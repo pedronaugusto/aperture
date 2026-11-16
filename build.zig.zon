@@ -1,0 +1,27 @@
+.{
+    .name = .aperture,
+    .version = "0.0.0",
+    .minimum_zig_version = "0.17.0",
+    .fingerprint = 0xd89691f2b25f626b,
+    .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE" },
+    .dependencies = .{
+        .aegis = .{
+            .url = "git+https://github.com/pedronaugusto/aegis#f52eabef3ec6534c3a74bea3a3b7d95a91ce2581",
+            .hash = "aegis-0.2.4-rsxouoquDQApwYDuGdd2YyEeTeNp6CnJoOZKdVCfc3jt",
+        },
+        .warp = .{
+            .url = "git+https://github.com/pedronaugusto/warp#0dcd20264ac8d569e1f73b103ee1d97b560d7ba4",
+            .hash = "warp-0.4.5-JASxFYV1LwDgDZjhEVs3ZoX8bNRUOtzhCIJQKf8gmPBO",
+        },
+    },
+    .dev_dependencies = .{
+        .shakedown = .{
+            .url = "git+https://github.com/pedronaugusto/shakedown#c29751d199924501be180c7cb476c553e5f94db4",
+            .hash = "shakedown-0.6.0-BR8U42rTGwCuOugyQpcemTBDqCsRl7uXESZcMWWpqVgb",
+        },
+        .preflight = .{
+            .url = "git+https://github.com/pedronaugusto/preflight?ref=ci-standard#158c1763b4142ac13715fb2b89d11fd46a1b4bed",
+            .hash = "preflight-0.18.6-LX1ZwskrHABgr9REQqYovipaEjRJIeV0GZNu-1rrr3dR",
+        },
+    },
+}

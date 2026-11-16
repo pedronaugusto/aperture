@@ -1,0 +1,34 @@
+{
+  "sources": [
+    "src"
+  ],
+  "test_roots": [
+    "src/tests.zig"
+  ],
+  "test_support": [
+    "src/testing"
+  ],
+  "test_dependencies": [],
+  "function_exceptions": {},
+  "layout_exceptions": {},
+  "glint_paths": [
+    "src",
+    "build.zig"
+  ],
+  "docs": {
+    "zig build docs -- encode": {
+      "source": "examples/usage.zig",
+      "region": "encode",
+      "imports": [
+        "aperture"
+      ]
+    },
+    "zig build docs -- decode": {
+      "source": "examples/usage.zig",
+      "region": "decode",
+      "imports": [
+        "aperture"
+      ]
+    }
+  }
+}
