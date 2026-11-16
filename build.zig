@@ -54,7 +54,25 @@ pub fn dev(b: *std.Build, tools: type) void {
     check.dependOn(&example.step);
     b.getInstallStep().dependOn(&tests.step);
     // The release tier runs the decoders' properties under Zig's fuzzer.
-    tools.preflight.addCi(b, p, .{ .tests = test_step, .portable_tests = true, .hardened = .{ .fuzz_step = "test", .tsan_step = "test" } });
+    tools.preflight.addCi(b, p, .{
+        .tests = test_step,
+        .portable_tests = true,
+        .hardened = .{ .fuzz_step = "test", .tsan_step = "test" },
+        .bench = .{
+            .programs = &.{.{ .name = "bench", .source = "bench/main.zig" }},
+            .imports = tools.preflight.Bench.importsFrom(benchImports),
+            .target = target,
+            .optimize = optimize,
+        },
+    });
     // A plain consumer: aperture, warp and aegis, nothing of aperture's development.
     tools.preflight.addConsumerCheck(b, p, .{ .package = "aperture", .program = p.path("examples/usage.zig"), .packages = &.{ p.dependency("aegis", .{ .target = target, .optimize = optimize }), p.dependency("warp", .{ .target = target, .optimize = optimize }) } });
+}
+
+/// What the benchmark program imports: aperture, as a consumer builds it.
+fn benchImports(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.lang.Optimize) []const std.Build.Module.Import {
+    const p = b.dependency("aperture", .{ .target = target, .optimize = optimize }).builder;
+    const module = b.createModule(.{ .root_source_file = p.path("src/aperture.zig"), .target = target, .optimize = optimize });
+    addImports(p, module, target, optimize);
+    return b.allocator.dupe(std.Build.Module.Import, &.{.{ .name = "aperture", .module = module }}) catch @panic("OOM");
 }
