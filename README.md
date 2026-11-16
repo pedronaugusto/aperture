@@ -9,7 +9,7 @@ memory or time. Built on warp (zlib and LZW), ladar (CPU features) and aegis.
 Status: in development, before 0.1.0. PNG is built both ways (every colour type and bit
 depth, Adam7, palette and tRNS, 16-bit samples, the ICC profile handed on) with pixel
 conversion, APNG frames, row-by-row decoding and encoding, scaling and quantization, and PngSuite decodes
-to Wuffs's pixels bit for bit. The SIMD kernels, and the benchmark rows come before 0.1.0, then
+to Wuffs's pixels bit for bit. The run-time dispatched kernels and the benchmark rows come before 0.1.0, then
 JPEG (0.2.0), GIF and WebP (0.3.0).
 
 ## Usage
