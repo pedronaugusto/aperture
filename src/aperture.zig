@@ -22,6 +22,14 @@ pub const Diagnostic = @import("Diagnostic.zig");
 /// PNG, both ways.
 pub const png = @import("png.zig");
 
+const resize_ = @import("resize.zig");
+pub const ResizeOptions = resize_.Options;
+pub const ResizeFilter = resize_.Filter;
+pub const ResizeError = resize_.Error;
+/// `src` scaled to `dst`'s size, in `dst`'s format: separable, in
+/// premultiplied alpha, in linear light on request.
+pub const resize = resize_.resize;
+
 /// The format `prefix` (a file's first 12 bytes or more) starts as, if
 /// aperture knows it.
 pub fn detect(prefix: []const u8) ?Format {
@@ -90,4 +98,5 @@ test {
     _ = pixel_;
     _ = png;
     _ = Image;
+    _ = resize_;
 }
