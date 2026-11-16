@@ -30,6 +30,13 @@ pub const ResizeError = resize_.Error;
 /// premultiplied alpha, in linear light on request.
 pub const resize = resize_.resize;
 
+const quantize_ = @import("quantize.zig");
+pub const QuantizeOptions = quantize_.Options;
+pub const QuantizeError = quantize_.Error;
+/// An image's colours reduced to a palette of at most 256 entries, as an
+/// `indexed8` image, dithered on request.
+pub const quantize = quantize_.quantize;
+
 /// The format `prefix` (a file's first 12 bytes or more) starts as, if
 /// aperture knows it.
 pub fn detect(prefix: []const u8) ?Format {
@@ -99,4 +106,5 @@ test {
     _ = png;
     _ = Image;
     _ = resize_;
+    _ = quantize_;
 }

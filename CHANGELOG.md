@@ -16,5 +16,8 @@ All notable changes to aperture are documented here. The format follows
   modes.
 - Scaling (`resize`): separable resampling with nearest, box, triangle, Catmull-Rom, Mitchell
   and Lanczos-3 filters, in premultiplied alpha, in linear light on request, edges clamped.
+- Palette quantization (`quantize`): at most 2 to 256 colours, cut from the histogram by
+  median cut and refined by k-means, distances taken premultiplied; Floyd-Steinberg
+  dithering on request.
 - Pixel formats (`PixelFormat`), images owned and borrowed (`Image`, `View`, `Mutable`),
   `Limits`, `Info`, `detect` and `convert`.
