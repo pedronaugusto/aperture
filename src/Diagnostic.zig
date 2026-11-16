@@ -43,4 +43,8 @@ pub const Reason = enum {
     png_chunk_order,
     /// A row's filter type past 4.
     png_filter,
+    /// An APNG frame past the canvas or empty, a disposal or blend APNG
+    /// does not define, a first frame that is the default image but does
+    /// not cover it, or more frames than acTL declares.
+    png_frame,
 };

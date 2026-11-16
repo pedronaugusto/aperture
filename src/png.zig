@@ -15,6 +15,10 @@ pub const ReadError = decode_.ReadError;
 /// IHDR's numbers.
 pub const Header = decode_.Header;
 pub const Colour = decode_.Colour;
+/// An animation frame's rectangle, delay, disposal and blending.
+pub const FrameInfo = decode_.FrameInfo;
+pub const Delay = decode_.Delay;
+pub const Animation = decode_.Animation;
 
 pub const EncodeOptions = encode_.Options;
 pub const EncodeMode = encode_.Mode;

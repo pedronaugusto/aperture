@@ -16,6 +16,7 @@ const Image = @import("../Image.zig");
 const Info = @import("../Info.zig");
 const Limits = @import("../Limits.zig");
 const Diagnostic = @import("../Diagnostic.zig");
+const Frames = @import("../Frames.zig");
 
 pub const Options = struct {
     limits: Limits = .{},
@@ -105,6 +106,22 @@ fn parseHeader(_: void, b: []const u8) HeaderError!Header {
 /// (every sample 0), as Wuffs gives it.
 pub const Key = union(enum) { none, gray: u16, rgb: [3]u16 };
 
+/// A frame's delay: `num / den` seconds, a `den` of 0 read as 100 (APNG).
+pub const Delay = struct { num: u16, den: u16 };
+
+/// An animation frame: where it lies on the canvas, how long it shows, how
+/// it is blended and disposed of.
+pub const FrameInfo = struct {
+    rect: Frames.Rect,
+    delay: Delay,
+    dispose: Frames.Dispose,
+    blend: Frames.Blend,
+};
+
+/// acTL: the frames and plays an APNG declares, and the fcTL before IDAT
+/// that makes the default image its first frame.
+pub const Animation = struct { frames: u32, plays: u32, first: ?FrameInfo = null };
+
 pub const Decoder = struct {
     gpa: Allocator,
     chunk: chunks.Reader,
@@ -124,6 +141,16 @@ pub const Decoder = struct {
     image: ?Image = null,
     next_row: u32 = 0,
     rows_left: u32 = 0,
+    /// Private: APNG's state. The chunk read past the last run of data and
+    /// not yet handled; the frames composited; the next sequence number.
+    anim: ?Animation = null,
+    pending: ?chunks.Header = null,
+    frames: ?Frames = null,
+    frame_index: u32 = 0,
+    next_seq: u32 = 0,
+    default_read: bool = false,
+    ended: bool = false,
+    work: aegis.bounded.Budget(u64),
 
     /// Read the signature, IHDR and every chunk before the first IDAT.
     /// `io` is unused until concurrent decoding comes; a sequential decoder
@@ -152,6 +179,7 @@ pub const Decoder = struct {
             .header = header,
             .first_idat = undefined,
             .budget = .init(options.limits.memory.raw()),
+            .work = .init(options.limits.work.raw()),
         };
         errdefer d.freeMeta();
         var seen_plte = false;
@@ -169,6 +197,21 @@ pub const Decoder = struct {
                 try d.readTransparency(c, seen_plte);
             } else if (chunks.is(c.type, "iCCP")) {
                 try d.readProfile(c);
+            } else if (chunks.is(c.type, "acTL")) {
+                if (c.len != 8 or d.anim != null) return d.chunk.fail(error.Invalid, .png_chunk_length, d.chunk.chunkStart());
+                var b: [8]u8 = undefined;
+                try d.chunk.data(&b);
+                try d.chunk.end();
+                const frames = std.mem.readInt(u32, b[0..4], .big);
+                if (frames == 0) return d.chunk.fail(error.Invalid, .png_chunk_length, d.chunk.chunkStart());
+                if (aegis.units.Count(Limits.Frame, u32).fromRaw(frames).compare(options.limits.frames) == .gt) return d.chunk.fail(error.TooLarge, .limit, d.chunk.chunkStart());
+                d.anim = .{ .frames = frames, .plays = std.mem.readInt(u32, b[4..8], .big) };
+            } else if (chunks.is(c.type, "fcTL") and d.anim != null) {
+                if (d.anim.?.first != null) return d.chunk.fail(error.Invalid, .png_chunk_order, d.chunk.chunkStart());
+                const f = try d.readFrameControl(c);
+                // The default image as the first frame covers the canvas.
+                if (f.rect.x != 0 or f.rect.y != 0 or !sameSize(f.rect.width, header.width) or !sameSize(f.rect.height, header.height)) return d.chunk.fail(error.Invalid, .png_frame, d.chunk.chunkStart());
+                d.anim.?.first = f;
             } else if (chunks.is(c.type, "IEND")) {
                 return d.chunk.fail(error.Invalid, .png_chunk_order, d.chunk.chunkStart());
             } else if (chunks.critical(c.type)) {
@@ -178,6 +221,29 @@ pub const Decoder = struct {
             }
         }
         return d;
+    }
+
+    /// fcTL: its sequence number the next one, its numbers bounded.
+    fn readFrameControl(d: *Decoder, c: chunks.Header) ReadError!FrameInfo {
+        if (c.len != 26) return d.chunk.fail(error.Invalid, .png_chunk_length, d.chunk.chunkStart());
+        var b: [26]u8 = undefined;
+        try d.chunk.data(&b);
+        try d.chunk.end();
+        try d.sequence(std.mem.readInt(u32, b[0..4], .big));
+        const dispose = std.enums.fromInt(Frames.Dispose, b[24]) orelse return d.chunk.fail(error.Invalid, .png_frame, d.chunk.chunkStart());
+        const blend = std.enums.fromInt(Frames.Blend, b[25]) orelse return d.chunk.fail(error.Invalid, .png_frame, d.chunk.chunkStart());
+        return .{
+            .rect = .{ .width = std.mem.readInt(u32, b[4..8], .big), .height = std.mem.readInt(u32, b[8..12], .big), .x = std.mem.readInt(u32, b[12..16], .big), .y = std.mem.readInt(u32, b[16..20], .big) },
+            .delay = .{ .num = std.mem.readInt(u16, b[20..22], .big), .den = std.mem.readInt(u16, b[22..24], .big) },
+            .dispose = dispose,
+            .blend = blend,
+        };
+    }
+
+    /// fcTL's and fdAT's sequence numbers count from 0 without a gap.
+    fn sequence(d: *Decoder, n: u32) error{Invalid}!void {
+        if (n != d.next_seq) return d.chunk.fail(error.Invalid, .png_chunk_order, d.chunk.chunkStart());
+        d.next_seq += 1;
     }
 
     fn charge(d: *Decoder, bytes: usize) error{TooLarge}!void {
@@ -284,6 +350,8 @@ pub const Decoder = struct {
             .height = d.header.height,
             .native = d.native(),
             .icc = d.icc,
+            .frames = if (d.anim) |a| a.frames else null,
+            .loops = if (d.anim) |a| a.plays else null,
         };
     }
 
@@ -305,19 +373,7 @@ pub const Decoder = struct {
     pub fn memory(d: *const Decoder, want: pixel.PixelFormat) aegis.units.Bytes(usize) {
         // Past the address space, the most a usize holds: no budget admits it.
         const rows = want.rowBytes(d.header.width.raw()).mul(d.header.height.raw()) catch return .fromRaw(std.math.maxInt(usize));
-        return rows.add(.fromRaw(d.filteredLen())) catch .fromRaw(std.math.maxInt(usize));
-    }
-
-    /// The bytes of every pass's filtered rows, filter bytes included.
-    fn filteredLen(d: *const Decoder) usize {
-        var total: usize = 0;
-        var passes = d.passIterator();
-        while (passes.next()) |p| total += @as(usize, p.height) * (1 + d.header.rowBytes(p.width));
-        return total;
-    }
-
-    fn passIterator(d: *const Decoder) Passes {
-        return .{ .width = d.header.width.raw(), .height = d.header.height.raw(), .interlaced = d.header.interlaced };
+        return rows.add(.fromRaw(filteredLen(d.header, d.header.width.raw(), d.header.height.raw()))) catch .fromRaw(std.math.maxInt(usize));
     }
 
     /// The whole image in `want`, allocated from the decoder's allocator.
@@ -369,13 +425,21 @@ pub const Decoder = struct {
     fn decodeInto(d: *Decoder, out: Image.Mutable) ReadError!void {
         const idat = try d.gatherData();
         defer d.gpa.free(idat);
-        const expected = d.filteredLen();
+        d.default_read = true;
+        try d.pixelsInto(idat, d.first_idat_start, out);
+    }
+
+    /// The pixels of `data` (one zlib stream of filtered rows, of `out`'s
+    /// size), unfiltered and converted into `out`.
+    fn pixelsInto(d: *Decoder, data: []const u8, at: u64, out: Image.Mutable) ReadError!void {
+        const w = out.width.raw();
+        const h = out.height.raw();
+        const expected = filteredLen(d.header, w, h);
         try d.charge(expected + warp.inflate_margin);
         const rows = try d.gpa.alloc(u8, expected + warp.inflate_margin);
         defer d.gpa.free(rows);
         var z: warp.Decompressor = .init;
-        const at = d.first_idat_start;
-        const r = z.inflate(idat, rows, .{ .accept = .zlib }) catch |err| return switch (err) {
+        const r = z.inflate(data, rows, .{ .accept = .zlib }) catch |err| return switch (err) {
             error.ChecksumMismatch => d.chunk.fail(error.Corrupt, .pixel_data, at),
             error.Truncated => d.chunk.fail(error.Truncated, .pixel_data, at),
             else => d.chunk.fail(error.Invalid, .pixel_data, at),
@@ -383,16 +447,16 @@ pub const Decoder = struct {
         if (r.out_len != expected) return d.chunk.fail(if (r.out_len < expected) error.Truncated else error.Invalid, .pixel_data, at);
 
         const native_format = d.native();
-        const scratch_bytes = native_format.rowBytes(d.header.width.raw()).add(.fromRaw(d.header.rowBytes(d.header.width.raw()))) catch return d.chunk.fail(error.TooLarge, .limit, 8);
+        const scratch_bytes = native_format.rowBytes(w).add(.fromRaw(d.header.rowBytes(w))) catch return d.chunk.fail(error.TooLarge, .limit, 8);
         try d.charge(scratch_bytes.raw());
-        const scratch = try d.gpa.alloc(u8, native_format.rowBytes(d.header.width.raw()).raw());
+        const scratch = try d.gpa.alloc(u8, native_format.rowBytes(w).raw());
         defer d.gpa.free(scratch);
-        const zeros = try d.gpa.alloc(u8, d.header.rowBytes(d.header.width.raw()));
+        const zeros = try d.gpa.alloc(u8, d.header.rowBytes(w));
         defer d.gpa.free(zeros);
         @memset(zeros, 0);
 
         var offset: usize = 0;
-        var passes = d.passIterator();
+        var passes: Passes = .{ .width = w, .height = h, .interlaced = d.header.interlaced };
         while (passes.next()) |p| {
             const rb = d.header.rowBytes(p.width);
             var prior: []const u8 = zeros[0..rb];
@@ -404,8 +468,7 @@ pub const Decoder = struct {
                 filter.unfilter(ft, row, prior, d.header.bpp());
                 prior = row;
                 d.expand(row, p.width, scratch);
-                const dst_y: u32 = @intCast(p.y0 + y * p.dy);
-                const dst = out.row(dst_y);
+                const dst = out.row(p.y0 + y * p.dy);
                 for (0..p.width) |x| {
                     const dst_x = p.x0 + x * p.dx;
                     if (out.format == native_format) {
@@ -419,7 +482,8 @@ pub const Decoder = struct {
         }
     }
 
-    /// Every IDAT chunk's data, one after another, through the last IDAT.
+    /// Every IDAT chunk's data, one after another, through the last IDAT;
+    /// the chunk after them is left pending.
     fn gatherData(d: *Decoder) ReadError![]u8 {
         var data: std.ArrayList(u8) = .empty;
         errdefer data.deinit(d.gpa);
@@ -432,10 +496,130 @@ pub const Decoder = struct {
             try d.chunk.data(data.items[at..]);
             try d.chunk.end();
             const next = try d.chunk.next() orelse break;
-            if (!chunks.is(next.type, "IDAT")) break;
+            if (!chunks.is(next.type, "IDAT")) {
+                d.pending = next;
+                break;
+            }
             c = next;
         }
         return data.toOwnedSlice(d.gpa);
+    }
+
+    /// An fcTL's frame data: the fdAT chunks after it, each less its
+    /// sequence number, one after another; the chunk after them pending.
+    fn gatherFrameData(d: *Decoder) ReadError![]u8 {
+        var data: std.ArrayList(u8) = .empty;
+        errdefer data.deinit(d.gpa);
+        while (true) {
+            const c = try d.chunk.next() orelse break;
+            if (!chunks.is(c.type, "fdAT")) {
+                d.pending = c;
+                break;
+            }
+            if (c.len < 4) return d.chunk.fail(error.Invalid, .png_chunk_length, d.chunk.chunkStart());
+            var seq: [4]u8 = undefined;
+            try d.chunk.data(&seq);
+            try d.sequence(std.mem.readInt(u32, &seq, .big));
+            try d.charge(c.len - 4);
+            const at = data.items.len;
+            try data.resize(d.gpa, at + c.len - 4);
+            try d.chunk.data(data.items[at..]);
+            try d.chunk.end();
+        }
+        return data.toOwnedSlice(d.gpa);
+    }
+
+    /// The next chunk: the pending one, or the next from the input.
+    fn nextChunk(d: *Decoder) ReadError!?chunks.Header {
+        if (d.pending) |p| {
+            d.pending = null;
+            return p;
+        }
+        return d.chunk.next();
+    }
+
+    /// The next frame composited onto the canvas, written into `out` (the
+    /// image's size, any format but `indexed8`); its rectangle, delay and
+    /// how it was drawn. A still PNG is one frame; an APNG's frames come
+    /// one call each. Null after the last. Each frame's composited pixels
+    /// are charged to `Limits.work` before it is decoded. Use either this or
+    /// `decode`/`readRows` on one decoder, not both.
+    pub fn nextFrame(d: *Decoder, out: Image.Mutable) ReadError!?FrameInfo {
+        aegis.assert.invariant(out.width.eql(d.header.width) and out.height.eql(d.header.height), "a frame is written at the canvas's size");
+        if (out.format == .indexed8) return error.Unsupported;
+        if (d.ended) return null;
+        const whole: Frames.Rect = .{ .x = 0, .y = 0, .width = d.header.width.raw(), .height = d.header.height.raw() };
+        const anim = d.anim orelse {
+            d.ended = true;
+            try d.decodeInto(out);
+            return .{ .rect = whole, .delay = .{ .num = 0, .den = 0 }, .dispose = .none, .blend = .source };
+        };
+        if (d.frames == null) {
+            try d.charge(Frames.memory(d.header.width, d.header.height).raw());
+            d.frames = try Frames.init(d.gpa, d.header.width, d.header.height);
+        }
+        var control: FrameInfo = undefined;
+        var data: []u8 = &.{};
+        var at: u64 = 0;
+        var have = false;
+        defer d.gpa.free(data);
+        if (!d.default_read) {
+            d.default_read = true;
+            const idat = try d.gatherData();
+            if (anim.first) |f| {
+                control = f;
+                data = idat;
+                at = d.first_idat_start;
+                have = true;
+            } else d.gpa.free(idat);
+        }
+        if (!have) while (true) {
+            const c = try d.nextChunk() orelse {
+                d.ended = true;
+                return null;
+            };
+            if (chunks.is(c.type, "IEND")) {
+                try d.chunk.end();
+                d.ended = true;
+                return null;
+            } else if (chunks.is(c.type, "fcTL")) {
+                at = d.chunk.chunkStart();
+                control = try d.readFrameControl(c);
+                data = try d.gatherFrameData();
+                break;
+            } else if (chunks.is(c.type, "fdAT") or chunks.is(c.type, "IDAT")) {
+                return d.chunk.fail(error.Invalid, .png_chunk_order, d.chunk.chunkStart());
+            } else if (chunks.critical(c.type)) {
+                return d.chunk.fail(error.Unsupported, .png_unknown_critical, d.chunk.chunkStart());
+            } else try d.chunk.end();
+        };
+        if (d.frame_index >= anim.frames) return d.chunk.fail(error.Invalid, .png_frame, at);
+        const frames = &d.frames.?;
+        if (!frames.holds(control.rect)) return d.chunk.fail(error.Invalid, .png_frame, at);
+        const canvas_pixels = aegis.units.Count(Limits.Pixel, u64).fromRaw(d.header.width.raw()).mul(d.header.height.raw()) catch aegis.assert.never("2^24 by 2^24 pixels fit a u64");
+        d.work.consume(canvas_pixels.raw()) catch return d.chunk.fail(error.TooLarge, .limit, at);
+
+        const fw = Image.Dimension.init(control.rect.width) catch return d.chunk.fail(error.Invalid, .png_frame, at);
+        const fh = Image.Dimension.init(control.rect.height) catch return d.chunk.fail(error.Invalid, .png_frame, at);
+        const stride = pixel.PixelFormat.rgba16.rowBytes(fw.raw());
+        const size = stride.mul(fh.raw()) catch return d.chunk.fail(error.TooLarge, .limit, at);
+        try d.charge(size.raw());
+        const pixels = try d.gpa.alloc(u8, size.raw());
+        defer d.gpa.free(pixels);
+        const frame: Image.Mutable = .{ .width = fw, .height = fh, .format = .rgba16, .stride = stride, .pixels = pixels };
+        try d.pixelsInto(data, at, frame);
+        frames.draw(control.rect, control.dispose, control.blend, frame.view(), d.frame_index == 0);
+        d.frame_index += 1;
+
+        const canvas = frames.view();
+        for (0..canvas.height.raw()) |y| {
+            const src = canvas.row(y);
+            const dst = out.row(y);
+            if (out.format == .rgba16) @memcpy(dst, src) else for (0..canvas.width.raw()) |x| {
+                pixel.put(out.format, dst, x, pixel.get(.rgba16, src, x, null));
+            }
+        }
+        return control;
     }
 
     /// A filtered row's samples, unfiltered, as `native()` pixels.
@@ -494,10 +678,26 @@ pub const Decoder = struct {
 
     pub fn deinit(d: *Decoder) void {
         d.freeMeta();
+        if (d.frames) |*f| f.deinit();
         if (d.image) |*image| image.deinit();
         d.* = undefined;
     }
 };
+
+/// Whether `n` pixels is the dimension `d`.
+fn sameSize(n: u32, d: Image.Dimension) bool {
+    const as = Image.Dimension.init(n) catch return false;
+    return as.eql(d);
+}
+
+/// The bytes of every pass's filtered rows of a `w` by `h` image, filter
+/// bytes included.
+fn filteredLen(h: Header, width: u32, height: u32) usize {
+    var total: usize = 0;
+    var passes: Passes = .{ .width = width, .height = height, .interlaced = h.interlaced };
+    while (passes.next()) |p| total += @as(usize, p.height) * (1 + h.rowBytes(p.width));
+    return total;
+}
 
 /// Sample `x` of a row of `depth`-bit samples (at most 8), most significant
 /// bits first.

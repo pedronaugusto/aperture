@@ -18,6 +18,8 @@ pub const View = Image.View;
 pub const Mutable = Image.Mutable;
 pub const Dimension = Image.Dimension;
 pub const Diagnostic = @import("Diagnostic.zig");
+/// The canvas animation frames are composited onto.
+pub const Frames = @import("Frames.zig");
 
 /// PNG, both ways.
 pub const png = @import("png.zig");
@@ -107,4 +109,5 @@ test {
     _ = Image;
     _ = resize_;
     _ = quantize_;
+    _ = Frames;
 }
