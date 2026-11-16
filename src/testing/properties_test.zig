@@ -350,27 +350,12 @@ fn zlibOf(case: *Case, px: []const u8, w: u32, h: u32) ![]const u8 {
 
 const Drawn = struct { rect: aperture.Frames.Rect, dispose: aperture.Frames.Dispose, blend: aperture.Frames.Blend, delay: [2]u16, px: []u8 };
 
-fn animation(_: void, case: *Case) !void {
+/// The APNG of `frames` on a `w` by `h` canvas: IHDR, acTL, the default
+/// image (frame 0's fcTL first when it is a frame, else an image of the
+/// case's drawing that is not one), then fcTL and fdAT for the rest.
+fn apngOf(case: *Case, frames: []const Drawn, w: u32, h: u32, default_is_frame: bool) ![]const u8 {
     const s = case.source;
-    const w = gen.intRange(s, u32, 1, 20);
-    const h = gen.intRange(s, u32, 1, 20);
-    const count = gen.intRange(s, u32, 1, 6);
-    const default_is_frame = gen.boolean(s);
-    const frames = try case.gpa.alloc(Drawn, count);
-    for (frames, 0..) |*f, i| {
-        const fw = if (i == 0 and default_is_frame) w else gen.intRange(s, u32, 1, w);
-        const fh = if (i == 0 and default_is_frame) h else gen.intRange(s, u32, 1, h);
-        const x = if (i == 0 and default_is_frame) 0 else gen.intRange(s, u32, 0, w - fw);
-        const y = if (i == 0 and default_is_frame) 0 else gen.intRange(s, u32, 0, h - fh);
-        const px = try case.gpa.alloc(u8, @as(usize, fw) * fh * 4);
-        _ = gen.bytesInto(s, px);
-        // Alphas clear, opaque and between.
-        for (0..px.len / 4) |p| px[p * 4 + 3] = gen.oneOf(s, u8, &.{ 0, 255, 255, px[p * 4 + 3] });
-        f.* = .{ .rect = .{ .x = x, .y = y, .width = fw, .height = fh }, .dispose = gen.enumValue(s, aperture.Frames.Dispose), .blend = gen.enumValue(s, aperture.Frames.Blend), .delay = .{ gen.int(s, u16), gen.intRange(s, u16, 1, 1000) }, .px = px };
-    }
-
-    // The file: IHDR, acTL, the default image (frame 0's fcTL first when it
-    // is a frame), then fcTL and fdAT for the rest.
+    const count: u32 = @intCast(frames.len);
     var file: std.Io.Writer.Allocating = .init(case.gpa);
     try file.writer.writeAll("\x89PNG\r\n\x1a\n");
     var ihdr: [13]u8 = undefined;
@@ -415,7 +400,30 @@ fn animation(_: void, case: *Case) !void {
     }
     try chunk(&file, "IEND", "");
 
-    var r: std.Io.Reader = .fixed(file.written());
+    return file.written();
+}
+
+fn animation(_: void, case: *Case) !void {
+    const s = case.source;
+    const w = gen.intRange(s, u32, 1, 20);
+    const h = gen.intRange(s, u32, 1, 20);
+    const count = gen.intRange(s, u32, 1, 6);
+    const default_is_frame = gen.boolean(s);
+    const frames = try case.gpa.alloc(Drawn, count);
+    for (frames, 0..) |*f, i| {
+        const fw = if (i == 0 and default_is_frame) w else gen.intRange(s, u32, 1, w);
+        const fh = if (i == 0 and default_is_frame) h else gen.intRange(s, u32, 1, h);
+        const x = if (i == 0 and default_is_frame) 0 else gen.intRange(s, u32, 0, w - fw);
+        const y = if (i == 0 and default_is_frame) 0 else gen.intRange(s, u32, 0, h - fh);
+        const px = try case.gpa.alloc(u8, @as(usize, fw) * fh * 4);
+        _ = gen.bytesInto(s, px);
+        // Alphas clear, opaque and between.
+        for (0..px.len / 4) |p| px[p * 4 + 3] = gen.oneOf(s, u8, &.{ 0, 255, 255, px[p * 4 + 3] });
+        f.* = .{ .rect = .{ .x = x, .y = y, .width = fw, .height = fh }, .dispose = gen.enumValue(s, aperture.Frames.Dispose), .blend = gen.enumValue(s, aperture.Frames.Blend), .delay = .{ gen.int(s, u16), gen.intRange(s, u16, 1, 1000) }, .px = px };
+    }
+
+    const file = try apngOf(case, frames, w, h, default_is_frame);
+    var r: std.Io.Reader = .fixed(file);
     var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
     defer d.deinit();
     const stride = aperture.PixelFormat.rgba16.rowBytes(w);

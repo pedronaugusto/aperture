@@ -1,7 +1,7 @@
 //! aperture: image codecs. Decoders stream from a `std.Io.Reader`, read the
 //! header before any pixel, and charge every allocation and every unit of
-//! work to `Limits` before spending it. PNG both ways and GIF decoding;
-//! JPEG and WebP follow, each a namespace lazy analysis drops when unused.
+//! work to `Limits` before spending it. PNG both ways, GIF and JPEG
+//! decoding; WebP follows, each a namespace lazy analysis drops when unused.
 
 const std = @import("std");
 const Io = std.Io;
@@ -25,6 +25,8 @@ pub const Frames = @import("Frames.zig");
 pub const png = @import("png.zig");
 /// GIF, decoded.
 pub const gif = @import("gif.zig");
+/// JPEG, decoded.
+pub const jpeg = @import("jpeg.zig");
 
 const resize_ = @import("resize.zig");
 pub const ResizeOptions = resize_.Options;
@@ -56,7 +58,7 @@ pub const DecodeOptions = struct {
     diagnostic: ?*Diagnostic = null,
 };
 
-pub const DecodeError = png.InitError || png.ReadError || gif.InitError || gif.ReadError;
+pub const DecodeError = png.InitError || png.ReadError || gif.InitError || gif.ReadError || jpeg.InitError || jpeg.ReadError;
 
 /// One-shot: the format from the first bytes, its header, then the whole
 /// image converted to `want`. A format aperture does not decode yet is
@@ -82,7 +84,12 @@ pub fn decode(gpa: Allocator, io: Io, reader: *Io.Reader, want: PixelFormat, opt
             defer d.deinit();
             return d.decode(want);
         },
-        .jpeg, .webp => return error.Unsupported,
+        .jpeg => {
+            var d = try jpeg.Decoder.init(gpa, null, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
+            defer d.deinit();
+            return d.decode(want);
+        },
+        .webp => return error.Unsupported,
     }
 }
 
@@ -106,6 +113,7 @@ test {
     _ = pixel_;
     _ = png;
     _ = gif;
+    _ = jpeg;
     _ = Image;
     _ = resize_;
     _ = quantize_;

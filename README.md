@@ -11,7 +11,8 @@ depth, Adam7, palette and tRNS, 16-bit samples, the ICC profile handed on) with 
 conversion, APNG frames, row-by-row decoding and encoding, scaling and quantization, and PngSuite decodes
 to Wuffs's pixels bit for bit. GIF decodes every frame composited, with its disposal,
 transparency, delay and loop count, frame for frame as Wuffs composites Wuffs's test GIFs.
-JPEG and WebP decoding and JPEG encoding come next.
+JPEG decodes baseline, extended and progressive files (gray, YCbCr, RGB, CMYK, YCCK, restart
+intervals) to libjpeg-turbo's samples bit for bit. WebP decoding and JPEG encoding come next.
 
 ## Usage
 
@@ -75,6 +76,13 @@ aperture assumes sRGB and hands an ICC profile to the caller.
   [shakedown](https://github.com/pedronaugusto/shakedown) are dev dependencies a project that
   depends on aperture never sees.
 
+## Credits
+
+This software is based in part on the work of the Independent JPEG Group. aperture's JPEG
+decoder follows the arithmetic of the IJG's libjpeg, as libjpeg-turbo carries it, so that its
+samples are libjpeg-turbo's; [LICENSES/IJG.md](LICENSES/IJG.md) names what follows it and holds
+the IJG's terms.
+
 ## Licence
 
-MIT.
+MIT, and the IJG's terms for what [LICENSES/IJG.md](LICENSES/IJG.md) names.

@@ -54,4 +54,27 @@ pub const Reason = enum {
     gif_graphic_control,
     /// An image's LZW minimum code size past 8.
     gif_literal_width,
+
+    // JPEG.
+    /// A marker where JPEG allows none (SOS before SOF, a second SOF or
+    /// SOI, EOI before any scan, one JPEG reserves), a segment whose length
+    /// is not its contents', or bytes between segments that are no marker.
+    jpeg_marker,
+    /// A Huffman or quantization table that breaks its rules, or one a
+    /// frame or scan names that is not defined.
+    jpeg_table,
+    /// A frame component's sampling factors outside 1 to 4.
+    jpeg_frame,
+    /// A scan's components, spectral selection or successive approximation
+    /// that JPEG or the progression so far does not allow.
+    jpeg_scan,
+    /// Unsupported: arithmetic coding.
+    jpeg_arithmetic,
+    /// Unsupported: samples of other than 8 bits.
+    jpeg_precision,
+    /// Unsupported: lossless or hierarchical coding.
+    jpeg_process,
+    /// Unsupported: a component count other than 1, 3 or 4, or a sampling
+    /// ratio that is not a whole number.
+    jpeg_components,
 };

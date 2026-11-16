@@ -19,6 +19,17 @@ pub const Orientation = enum(u3) {
     rotate_270,
 };
 
+/// How a file stores its colour (JPEG's components): before any pixel, so
+/// a caller knows what conversion decoding makes.
+pub const ColourModel = struct {
+    kind: Kind,
+    /// CMYK or YCCK stored inverted, as Adobe's writers store them (an
+    /// Adobe marker present).
+    inverted: bool = false,
+
+    pub const Kind = enum { gray, ycbcr, rgb, cmyk, ycck };
+};
+
 format: Format,
 width: Image.Dimension,
 height: Image.Dimension,
@@ -29,6 +40,9 @@ frames: ?u32 = null,
 /// Times an animation plays (0 forever), where the file says.
 loops: ?u32 = null,
 orientation: Orientation = .normal,
+/// The stored colour model, for a format that has more than one (JPEG):
+/// decoding converts YCbCr to RGB, and CMYK and YCCK to RGB.
+colour_model: ?ColourModel = null,
 /// The ICC profile, decompressed, borrowed from the decoder: aperture
 /// assumes sRGB and hands the profile on.
 icc: ?[]const u8 = null,

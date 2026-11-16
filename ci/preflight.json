@@ -9,6 +9,9 @@
     "src/testing"
   ],
   "test_dependencies": [],
+  "shipped": {
+    "LICENSES": "the IJG's terms, which travel with the JPEG decoder's code that follows its work"
+  },
   "function_exceptions": {},
   "layout_exceptions": {},
   "glint_paths": [

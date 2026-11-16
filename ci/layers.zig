@@ -11,6 +11,10 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "png", .patterns = &.{"src/png.zig"} },
     .{ .name = "gif codecs", .patterns = &.{"src/gif/decode.zig"} },
     .{ .name = "gif", .patterns = &.{"src/gif.zig"} },
+    .{ .name = "jpeg parts", .patterns = &.{ "src/jpeg/markers.zig", "src/jpeg/huffman.zig", "src/jpeg/idct.zig", "src/jpeg/colour.zig" } },
+    .{ .name = "jpeg scans", .patterns = &.{"src/jpeg/progressive.zig"} },
+    .{ .name = "jpeg codecs", .patterns = &.{"src/jpeg/decode.zig"} },
+    .{ .name = "jpeg", .patterns = &.{"src/jpeg.zig"} },
     .{ .name = "public", .patterns = &.{"src/aperture.zig"} },
 };
 
@@ -22,7 +26,7 @@ const package_references = [_]gantry.rules.ReferenceRule{
     .{
         .name = "named dependencies",
         .unresolved_only = true,
-        .except_targets = &.{ "std", "aegis", "warp", "builtin", "shakedown", "pngsuite.corpus", "gif.corpus", "animated-red-blue.apng", "animated-red-blue.000000.nie", "animated-red-blue.000001.nie", "animated-red-blue.000002.nie", "animated-red-blue.000003.nie", "apng-skip-idat.png", "muybridge.apng" },
+        .except_targets = &.{ "std", "aegis", "warp", "builtin", "shakedown", "pngsuite.corpus", "gif.corpus", "jpeg.corpus", "animated-red-blue.apng", "animated-red-blue.000000.nie", "animated-red-blue.000001.nie", "animated-red-blue.000002.nie", "animated-red-blue.000003.nie", "apng-skip-idat.png", "muybridge.apng" },
     },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };
@@ -50,5 +54,12 @@ pub const required = [_][]const u8{
     "src/png.zig",
     "src/gif/decode.zig",
     "src/gif.zig",
+    "src/jpeg/markers.zig",
+    "src/jpeg/huffman.zig",
+    "src/jpeg/idct.zig",
+    "src/jpeg/colour.zig",
+    "src/jpeg/progressive.zig",
+    "src/jpeg/decode.zig",
+    "src/jpeg.zig",
     "src/aperture.zig",
 };

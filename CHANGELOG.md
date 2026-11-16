@@ -24,6 +24,15 @@ All notable changes to aperture are documented here. The format follows
   frame and later frames clipped to it; pixel data short of a frame, past it, or holding a bad
   code refused, as Wuffs refuses them; each frame charged to `Limits.work` and
   `Limits.frames`.
+- JPEG decoding (`jpeg.Decoder`, `decode`): baseline, extended and progressive Huffman-coded
+  8-bit JPEG; gray, YCbCr, RGB, CMYK and YCCK (CMYK and YCCK converted to RGB by `decode`, the
+  component samples as libjpeg-turbo gives them from `Decoder.samples`); every sampling of
+  whole ratios, restart intervals; the islow IDCT, fancy upsampling and colour conversion of
+  libjpeg-turbo, bit for bit; `Info.colour_model` names the stored colour model before any
+  pixel. Arithmetic coding, 12-bit samples and lossless or hierarchical coding are refused as
+  `Unsupported` by name; where libjpeg-turbo recovers from corrupt data with a warning,
+  aperture refuses. Coefficients charged to `Limits.memory`, progressive scans to
+  `Limits.scans`.
 - PNG encoding (`png.encode`): each row's filter chosen by the least sum of absolute
   differences, the smallest lossless colour type by default (no alpha, gray at 1 to 16 bits,
   a palette for at most 256 colours, 8 bits for widened 16-bit samples), warp's zlib in three
