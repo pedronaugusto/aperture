@@ -18,7 +18,7 @@ pub const Reason = enum {
     /// The pixels, memory or work the image needs pass `Limits`.
     limit,
     /// The compressed pixel data does not decode, or decodes to more or
-    /// fewer bytes than the image's rows.
+    /// fewer bytes (or pixels) than the image's rows.
     pixel_data,
 
     // PNG.
@@ -47,4 +47,11 @@ pub const Reason = enum {
     /// does not define, a first frame that is the default image but does
     /// not cover it, or more frames than acTL declares.
     png_frame,
+
+    // GIF.
+    /// A graphic control extension not 4 bytes long, or not ended by an
+    /// empty block.
+    gif_graphic_control,
+    /// An image's LZW minimum code size past 8.
+    gif_literal_width,
 };

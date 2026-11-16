@@ -29,8 +29,22 @@ pub const Blend = enum(u8) {
     over,
 };
 
-/// A frame's place on the canvas: within it, never empty.
+/// A frame's place on the canvas, within it. APNG's are never empty; a
+/// GIF's may be, where its frame lies past the canvas or has no pixels.
 pub const Rect = struct { x: u32, y: u32, width: u32, height: u32 };
+
+/// A frame's delay: `num / den` seconds (APNG's `den` of 0 read as 100; a
+/// GIF's in hundredths).
+pub const Delay = struct { num: u16, den: u16 };
+
+/// An animation frame: where it lies on the canvas, how long it shows, how
+/// it is blended and disposed of.
+pub const Frame = struct {
+    rect: Rect,
+    delay: Delay,
+    dispose: Dispose,
+    blend: Blend,
+};
 
 gpa: Allocator,
 width: Image.Dimension,
@@ -75,23 +89,31 @@ pub fn view(f: *const Frames) Image.View {
     return .{ .width = f.width, .height = f.height, .format = .rgba16, .stride = pixel.PixelFormat.rgba16.rowBytes(f.width.raw()), .pixels = f.canvas };
 }
 
-fn row(f: *Frames, y: usize) []u8 {
+/// Row `y` of the canvas, `rgba16`, for a decoder that draws its frame
+/// onto it directly (after `begin`).
+pub fn row(f: *Frames, y: usize) []u8 {
     const m: Image.Mutable = .{ .width = f.width, .height = f.height, .format = .rgba16, .stride = pixel.PixelFormat.rgba16.rowBytes(f.width.raw()), .pixels = f.canvas };
     return m.row(y);
 }
 
-/// Whether `rect` lies within the canvas.
+/// Whether `rect` lies within the canvas and is not empty.
 pub fn holds(f: *const Frames, rect: Rect) bool {
-    const w: u64 = f.width.raw();
-    const h: u64 = f.height.raw();
-    return rect.width > 0 and rect.height > 0 and @as(u64, rect.x) + rect.width <= w and @as(u64, rect.y) + rect.height <= h;
+    return rect.width > 0 and rect.height > 0 and f.within(rect);
 }
 
-/// Composite a frame: the last frame's disposal first, then `frame` (an
-/// `rgba16` image of `rect`'s size) blended into `rect`. `first` treats a
-/// `previous` disposal as `background`, as APNG says of the first frame.
-pub fn draw(f: *Frames, rect: Rect, dispose: Dispose, blend: Blend, frame: Image.View, first: bool) void {
-    aegis.assert.invariant(f.holds(rect), "a frame lies within the canvas (its decoder checks it)");
+/// Whether `rect` lies within the canvas, empty or not.
+pub fn within(f: *const Frames, rect: Rect) bool {
+    const w: u64 = f.width.raw();
+    const h: u64 = f.height.raw();
+    return @as(u64, rect.x) + rect.width <= w and @as(u64, rect.y) + rect.height <= h;
+}
+
+/// Start a frame: the last frame's disposal applied, and `rect` (within
+/// the canvas, perhaps empty) saved if this frame's disposal restores it.
+/// `first` treats a `previous` disposal as `background`, as APNG says of
+/// the first frame (and as GIF's comes to, the canvas starting clear).
+pub fn begin(f: *Frames, rect: Rect, dispose: Dispose, first: bool) void {
+    aegis.assert.invariant(f.within(rect), "a frame lies within the canvas (its decoder clips or checks it)");
     if (f.last) |last| switch (last.dispose) {
         .none => {},
         .background => for (last.rect.y..last.rect.y + last.rect.height) |y| {
@@ -107,6 +129,14 @@ pub fn draw(f: *Frames, rect: Rect, dispose: Dispose, blend: Blend, frame: Image
         const n = rect.width * 8;
         @memcpy(f.saved[i * n ..][0..n], f.row(rect.y + i)[rect.x * 8 ..][0..n]);
     };
+    f.last = .{ .rect = rect, .dispose = d };
+}
+
+/// Composite a frame: `begin`, then `frame` (an `rgba16` image of `rect`'s
+/// size, `rect` not empty) blended into `rect`.
+pub fn draw(f: *Frames, rect: Rect, dispose: Dispose, blend: Blend, frame: Image.View, first: bool) void {
+    aegis.assert.invariant(f.holds(rect), "a frame lies within the canvas (its decoder checks it)");
+    f.begin(rect, dispose, first);
     for (0..rect.height) |i| {
         const src = frame.row(i);
         const dst = f.row(rect.y + i)[rect.x * 8 ..][0 .. rect.width * 8];
@@ -123,7 +153,6 @@ pub fn draw(f: *Frames, rect: Rect, dispose: Dispose, blend: Blend, frame: Image
             },
         }
     }
-    f.last = .{ .rect = rect, .dispose = d };
 }
 
 /// Straight-alpha "over": each colour weighted by its alpha, the result's

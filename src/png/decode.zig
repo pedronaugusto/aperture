@@ -107,17 +107,8 @@ fn parseHeader(_: void, b: []const u8) HeaderError!Header {
 /// (every sample 0), as Wuffs gives it.
 pub const Key = union(enum) { none, gray: u16, rgb: [3]u16 };
 
-/// A frame's delay: `num / den` seconds, a `den` of 0 read as 100 (APNG).
-pub const Delay = struct { num: u16, den: u16 };
-
-/// An animation frame: where it lies on the canvas, how long it shows, how
-/// it is blended and disposed of.
-pub const FrameInfo = struct {
-    rect: Frames.Rect,
-    delay: Delay,
-    dispose: Frames.Dispose,
-    blend: Frames.Blend,
-};
+pub const Delay = Frames.Delay;
+pub const FrameInfo = Frames.Frame;
 
 /// acTL: the frames and plays an APNG declares, and the fcTL before IDAT
 /// that makes the default image its first frame.

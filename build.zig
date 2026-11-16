@@ -34,6 +34,7 @@ pub fn dev(b: *std.Build, tools: type) void {
     root.addImport("shakedown", b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown"));
     // The corpora captured from the reference decoders (pedronaugusto/trials, aperture/).
     root.addAnonymousImport("pngsuite.corpus", .{ .root_source_file = p.path("testdata/pngsuite.corpus") });
+    root.addAnonymousImport("gif.corpus", .{ .root_source_file = p.path("testdata/gif.corpus") });
     // Wuffs's own test images (google/wuffs b36a81d, test/data).
     for ([_][]const u8{ "animated-red-blue.apng", "animated-red-blue.000000.nie", "animated-red-blue.000001.nie", "animated-red-blue.000002.nie", "animated-red-blue.000003.nie", "apng-skip-idat.png", "muybridge.apng" }) |name| {
         root.addAnonymousImport(name, .{ .root_source_file = p.path(b.fmt("testdata/{s}", .{name})) });

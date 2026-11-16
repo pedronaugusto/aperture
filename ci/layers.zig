@@ -9,6 +9,8 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "png parts", .patterns = &.{ "src/png/chunks.zig", "src/png/filter.zig" } },
     .{ .name = "png codecs", .patterns = &.{ "src/png/decode.zig", "src/png/encode.zig" } },
     .{ .name = "png", .patterns = &.{"src/png.zig"} },
+    .{ .name = "gif codecs", .patterns = &.{"src/gif/decode.zig"} },
+    .{ .name = "gif", .patterns = &.{"src/gif.zig"} },
     .{ .name = "public", .patterns = &.{"src/aperture.zig"} },
 };
 
@@ -20,7 +22,7 @@ const package_references = [_]gantry.rules.ReferenceRule{
     .{
         .name = "named dependencies",
         .unresolved_only = true,
-        .except_targets = &.{ "std", "aegis", "warp", "builtin", "shakedown", "pngsuite.corpus", "animated-red-blue.apng", "animated-red-blue.000000.nie", "animated-red-blue.000001.nie", "animated-red-blue.000002.nie", "animated-red-blue.000003.nie", "apng-skip-idat.png", "muybridge.apng" },
+        .except_targets = &.{ "std", "aegis", "warp", "builtin", "shakedown", "pngsuite.corpus", "gif.corpus", "animated-red-blue.apng", "animated-red-blue.000000.nie", "animated-red-blue.000001.nie", "animated-red-blue.000002.nie", "animated-red-blue.000003.nie", "apng-skip-idat.png", "muybridge.apng" },
     },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };
@@ -46,5 +48,7 @@ pub const required = [_][]const u8{
     "src/png/decode.zig",
     "src/png/encode.zig",
     "src/png.zig",
+    "src/gif/decode.zig",
+    "src/gif.zig",
     "src/aperture.zig",
 };
