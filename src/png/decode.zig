@@ -101,7 +101,8 @@ fn parseHeader(_: void, b: []const u8) HeaderError!Header {
 }
 
 /// tRNS: the colour taken as transparent, or the palette's alphas (set in
-/// the palette itself).
+/// the palette itself). A pixel of that colour decodes as transparent black
+/// (every sample 0), as Wuffs gives it.
 pub const Key = union(enum) { none, gray: u16, rgb: [3]u16 };
 
 pub const Decoder = struct {
@@ -449,14 +450,16 @@ pub const Decoder = struct {
                 if (h.depth == 16) {
                     const v = std.mem.readInt(u16, row[x * 2 ..][0..2], .big);
                     const n: usize = if (keyed) 4 else 2;
-                    pixel.putLe(out[x * n ..][0..2], v);
-                    if (keyed) pixel.putLe(out[x * n + 2 ..][0..2], if (d.key.gray == v) 0 else 65535);
+                    const clear = keyed and d.key.gray == v;
+                    pixel.putLe(out[x * n ..][0..2], if (clear) 0 else v);
+                    if (keyed) pixel.putLe(out[x * n + 2 ..][0..2], if (clear) 0 else 65535);
                 } else {
                     const v = sample(row, x, h.depth);
                     const scaled: u8 = @intCast(@as(u16, v) * (255 / ((@as(u16, 1) << @as(u4, @intCast(h.depth))) - 1)));
                     if (keyed) {
-                        out[x * 2] = scaled;
-                        out[x * 2 + 1] = if (d.key.gray == v) 0 else 255;
+                        const clear = d.key.gray == v;
+                        out[x * 2] = if (clear) 0 else scaled;
+                        out[x * 2 + 1] = if (clear) 0 else 255;
                     } else out[x] = scaled;
                 }
             },
@@ -465,13 +468,17 @@ pub const Decoder = struct {
                     var v: [3]u16 = undefined;
                     for (0..3) |i| v[i] = std.mem.readInt(u16, row[x * 6 + i * 2 ..][0..2], .big);
                     const n: usize = if (keyed) 8 else 6;
-                    for (0..3) |i| pixel.putLe(out[x * n + i * 2 ..][0..2], v[i]);
-                    if (keyed) pixel.putLe(out[x * n + 6 ..][0..2], if (std.mem.eql(u16, &d.key.rgb, &v)) 0 else 65535);
+                    const clear = keyed and std.mem.eql(u16, &d.key.rgb, &v);
+                    for (0..3) |i| pixel.putLe(out[x * n + i * 2 ..][0..2], if (clear) 0 else v[i]);
+                    if (keyed) pixel.putLe(out[x * n + 6 ..][0..2], if (clear) 0 else 65535);
                 } else {
                     const v = row[x * 3 ..][0..3];
                     const n: usize = if (keyed) 4 else 3;
-                    @memcpy(out[x * n ..][0..3], v);
-                    if (keyed) out[x * n + 3] = if (d.key.rgb[0] == v[0] and d.key.rgb[1] == v[1] and d.key.rgb[2] == v[2]) 0 else 255;
+                    const clear = keyed and d.key.rgb[0] == v[0] and d.key.rgb[1] == v[1] and d.key.rgb[2] == v[2];
+                    if (clear) @memset(out[x * n ..][0..4], 0) else {
+                        @memcpy(out[x * n ..][0..3], v);
+                        if (keyed) out[x * n + 3] = 255;
+                    }
                 }
             },
             .gray_alpha, .rgba => {

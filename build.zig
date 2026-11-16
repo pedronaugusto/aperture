@@ -32,6 +32,8 @@ pub fn dev(b: *std.Build, tools: type) void {
     addImports(p, root, target, optimize);
     // The test doubles and fuzz cases are shakedown's.
     root.addImport("shakedown", b.dependency("shakedown", .{ .target = target, .optimize = optimize }).module("shakedown"));
+    // The corpora captured from the reference decoders (pedronaugusto/trials, aperture/).
+    root.addAnonymousImport("pngsuite.corpus", .{ .root_source_file = p.path("testdata/pngsuite.corpus") });
     const tests = b.addTest(.{ .name = "aperture-tests", .filters = filters, .root_module = root });
     const check = b.step("check", "Compile the tests without running them");
     const test_step = b.step("test", "Run the tests");

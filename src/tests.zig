@@ -3,4 +3,5 @@
 test {
     _ = @import("aperture.zig");
     _ = @import("testing/png_test.zig");
+    _ = @import("testing/pngsuite_test.zig");
 }
