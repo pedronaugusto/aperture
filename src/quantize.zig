@@ -63,13 +63,8 @@ pub fn quantize(gpa: Allocator, src: Image.View, options: Options) Error!Image {
             g.value_ptr.* += 1;
         }
     }
-    const entries = try gpa.alloc(Entry, counts.count());
+    const entries = try histogram(gpa, &counts);
     defer gpa.free(entries);
-    for (counts.keys(), counts.values(), entries) |k, n, *e| {
-        var c8: [4]u8 = undefined;
-        std.mem.writeInt(u32, &c8, k, .little);
-        e.* = .{ .c = premul(c8), .n = @floatFromInt(n) };
-    }
 
     const want = @min(options.colours.raw(), entries.len);
     const centres = try gpa.alloc([4]f32, want);
@@ -79,7 +74,7 @@ pub fn quantize(gpa: Allocator, src: Image.View, options: Options) Error!Image {
         for (entries, centres) |e, *c| c.* = e.c;
     } else {
         try cut(gpa, entries, centres);
-        refine(entries, centres, options.refine);
+        try refine(gpa, entries, centres, options.refine);
     }
 
     const palette = try gpa.alloc([4]u8, want);
@@ -101,8 +96,114 @@ pub fn quantize(gpa: Allocator, src: Image.View, options: Options) Error!Image {
     return image;
 }
 
-/// The entry nearest `c`.
-fn nearest(centres: []const [4]f32, c: [4]f32) u8 {
+/// The most distinct colours the palette is cut from: past it, colours
+/// that agree in all but their low bits are taken as one, their weighted
+/// mean (as pngquant posterizes its histogram).
+const histogram_limit = 1 << 16;
+
+/// The histogram's colours as premultiplied entries: each distinct colour,
+/// or, past `histogram_limit`, each bucket of colours sharing their high
+/// bits, at its weighted mean.
+fn histogram(gpa: Allocator, counts: *const std.array_hash_map.Auto(u32, u32)) Error![]Entry {
+    if (counts.count() <= histogram_limit) {
+        const entries = try gpa.alloc(Entry, counts.count());
+        for (counts.keys(), counts.values(), entries) |k, n, *e| {
+            var c8: [4]u8 = undefined;
+            std.mem.writeInt(u32, &c8, k, .little);
+            e.* = .{ .c = premul(c8), .n = @floatFromInt(n) };
+        }
+        return entries;
+    }
+    var buckets: std.array_hash_map.Auto(u32, Entry) = .empty;
+    defer buckets.deinit(gpa);
+    var shift: u3 = 1;
+    while (true) : (shift += 1) {
+        buckets.clearRetainingCapacity();
+        const mask = @as(u32, @as(u8, 0xff) << shift) * 0x01010101;
+        for (counts.keys(), counts.values()) |k, n| {
+            const g = try buckets.getOrPut(gpa, k & mask);
+            if (!g.found_existing) g.value_ptr.* = .{ .c = @splat(0), .n = 0 };
+            var c8: [4]u8 = undefined;
+            std.mem.writeInt(u32, &c8, k, .little);
+            const c = premul(c8);
+            const w: f32 = @floatFromInt(n);
+            for (0..4) |i| g.value_ptr.c[i] += c[i] * w;
+            g.value_ptr.n += w;
+        }
+        if (buckets.count() <= histogram_limit) break;
+        aegis.assert.invariant(shift < 7, "one bit a channel leaves at most 16 buckets");
+    }
+    const entries = try gpa.alloc(Entry, buckets.count());
+    for (buckets.values(), entries) |b, *e| {
+        var c: [4]f32 = undefined;
+        for (0..4) |i| c[i] = b.c[i] / b.n;
+        e.* = .{ .c = c, .n = b.n };
+    }
+    return entries;
+}
+
+/// The palette's entries, each with the others in order of their distance
+/// from it, so the search for a colour's nearest entry starts at a guess
+/// (the last pixel's, in an image) and stops at the first neighbour of the
+/// guess too far from it to be nearer than the nearest found: by the
+/// triangle inequality, an entry `d` from the guess, when the colour is `r`
+/// from it, is at least `d - r` from the colour.
+const Nearest = struct {
+    centres: []const [4]f32,
+    /// For each entry, the entries by their distance from it (itself
+    /// among the first, after any equal entry of a lower index), and those
+    /// distances.
+    order: *[256][256]u8,
+    gap: *[256][256]f32,
+
+    fn init(gpa: Allocator, centres: []const [4]f32) Error!Nearest {
+        const order = try gpa.create([256][256]u8);
+        errdefer gpa.destroy(order);
+        const gap = try gpa.create([256][256]f32);
+        for (centres, 0..) |c, i| {
+            var from: [256]f32 = undefined;
+            for (centres, 0..) |o, j| {
+                order[i][j] = @intCast(j);
+                from[j] = @sqrt(distance(c, o));
+            }
+            std.mem.sort(u8, order[i][0..centres.len], &from, struct {
+                fn lt(g: *const [256]f32, l: u8, r: u8) bool {
+                    return g[l] < g[r] or (g[l] == g[r] and l < r);
+                }
+            }.lt);
+            for (order[i][0..centres.len], gap[i][0..centres.len]) |j, *d| d.* = from[j];
+        }
+        return .{ .centres = centres, .order = order, .gap = gap };
+    }
+
+    fn deinit(n: *Nearest, gpa: Allocator) void {
+        gpa.destroy(n.order);
+        gpa.destroy(n.gap);
+        n.* = undefined;
+    }
+
+    /// The entry nearest `c`, the lowest index of those as near, searched
+    /// from the entry `guess`.
+    fn find(n: *const Nearest, c: [4]f32, guess: u8) u8 {
+        const r = @sqrt(distance(n.centres[guess], c));
+        var best = guess;
+        var best_d = r * r;
+        const len = n.centres.len;
+        for (n.order[guess][0..len], n.gap[guess][0..len]) |j, d| {
+            // A little past the bound, for rounding.
+            if (d > (r + @sqrt(best_d)) * 1.0001 + 0.001) break;
+            const e = distance(n.centres[j], c);
+            if (e < best_d or (e == best_d and j < best)) {
+                best_d = e;
+                best = j;
+            }
+        }
+        return best;
+    }
+};
+
+/// The entry nearest `c`, every entry compared: what `Nearest` finds.
+fn nearestScan(centres: []const [4]f32, c: [4]f32) u8 {
     var best: usize = 0;
     var best_d = std.math.inf(f32);
     for (centres, 0..) |p, i| {
@@ -116,16 +217,22 @@ fn nearest(centres: []const [4]f32, c: [4]f32) u8 {
 }
 
 fn map(gpa: Allocator, src: Image.View, dst: Image.Mutable, centres: []const [4]f32) Error!void {
-    var cache: std.AutoHashMapUnmanaged(u32, u8) = .empty;
-    defer cache.deinit(gpa);
+    var near: Nearest = try .init(gpa, centres);
+    defer near.deinit(gpa);
+    // The last pixel's colour and entry: the search's guess, and its answer
+    // again for a run of one colour.
+    var last: u8 = 0;
+    var last_colour: ?[4]u8 = null;
     for (0..src.height.raw()) |y| {
         const row = src.row(y);
         const out = dst.row(y);
         for (out, 0..) |*o, x| {
             const c8 = eightBit(pixel.get(src.format, row, x, src.palette));
-            const g = try cache.getOrPut(gpa, std.mem.readInt(u32, &c8, .little));
-            if (!g.found_existing) g.value_ptr.* = nearest(centres, premul(c8));
-            o.* = g.value_ptr.*;
+            if (last_colour == null or !std.mem.eql(u8, &last_colour.?, &c8)) {
+                last = near.find(premul(c8), last);
+                last_colour = c8;
+            }
+            o.* = last;
         }
     }
 }
@@ -140,6 +247,9 @@ fn diffuse(gpa: Allocator, src: Image.View, dst: Image.Mutable, centres: []const
     @memset(err, @splat(0));
     var this = err[0 .. w + 2];
     var next = err[w + 2 ..];
+    var near: Nearest = try .init(gpa, centres);
+    defer near.deinit(gpa);
+    var last: u8 = 0;
     for (0..src.height.raw()) |y| {
         const row = src.row(y);
         const out = dst.row(y);
@@ -149,7 +259,8 @@ fn diffuse(gpa: Allocator, src: Image.View, dst: Image.Mutable, centres: []const
             const c = premul(eightBit(pixel.get(src.format, row, x, src.palette)));
             var want: [4]f32 = undefined;
             for (0..4) |k| want[k] = std.math.clamp(c[k] + this[x + 1][k], 0, 255);
-            const idx = nearest(centres, want);
+            const idx = near.find(want, last);
+            last = idx;
             out[x] = idx;
             const ahead: usize = if (back) x else x + 2;
             const behind: usize = if (back) x + 2 else x;
@@ -240,16 +351,19 @@ fn widest(items: []const Entry) usize {
 
 /// k-means: each colour to its nearest centre, each centre to its colours'
 /// weighted mean; a centre no colour chose stays.
-fn refine(entries: []const Entry, centres: [][4]f32, passes: u8) void {
+fn refine(gpa: Allocator, entries: []const Entry, centres: [][4]f32, passes: u8) Error!void {
     var sums: [256][4]f32 = undefined;
     var ns: [256]f32 = undefined;
     for (0..passes) |_| {
         @memset(sums[0..centres.len], @splat(0));
         @memset(ns[0..centres.len], 0);
+        var near: Nearest = try .init(gpa, centres);
+        defer near.deinit(gpa);
+        var chosen: u8 = 0;
         for (entries) |e| {
-            const i = nearest(centres, e.c);
-            for (0..4) |k| sums[i][k] += e.c[k] * e.n;
-            ns[i] += e.n;
+            chosen = near.find(e.c, chosen);
+            for (0..4) |k| sums[chosen][k] += e.c[k] * e.n;
+            ns[chosen] += e.n;
         }
         for (centres, 0..) |*c, i| if (ns[i] > 0) {
             for (0..4) |k| c[k] = sums[i][k] / ns[i];
@@ -294,4 +408,45 @@ test "a gradient of many colours quantizes close, dithered or not" {
             try testing.expect(total / (w * w * 3) < 15);
         }
     }
+}
+
+test "the search from a guess finds the entry every comparison finds" {
+    const testing = std.testing;
+    var prng: std.Random.DefaultPrng = .init(23);
+    const r = prng.random();
+    for ([_]usize{ 2, 3, 16, 255, 256 }) |len| {
+        var centres: [256][4]f32 = undefined;
+        for (centres[0..len]) |*c| for (c) |*v| {
+            v.* = @floatFromInt(r.uintLessThan(u8, 8) * 32);
+        };
+        var near: Nearest = try .init(testing.allocator, centres[0..len]);
+        defer near.deinit(testing.allocator);
+        for (0..2000) |_| {
+            var c: [4]f32 = undefined;
+            for (&c) |*v| v.* = r.float(f32) * 260 - 2;
+            try testing.expectEqual(nearestScan(centres[0..len], c), near.find(c, @intCast(r.uintLessThan(usize, len))));
+        }
+    }
+}
+
+test "past the histogram's limit, colours are taken in buckets of their weighted mean" {
+    const testing = std.testing;
+    const w = 512;
+    const px = try testing.allocator.alloc(u8, w * w * 4);
+    defer testing.allocator.free(px);
+    for (0..w) |y| for (0..w) |x| {
+        px[(y * w + x) * 4 ..][0..4].* = .{ @truncate(x), @truncate(y), @truncate(x ^ y), 255 };
+    };
+    const src: Image.View = .{ .width = .literal(w), .height = .literal(w), .format = .rgba8, .stride = .fromRaw(w * 4), .pixels = px };
+    var q = try quantize(testing.allocator, src, .{});
+    defer q.deinit();
+    try testing.expectEqual(@as(usize, 256), q.palette.?.len);
+    var total: f64 = 0;
+    for (0..w * w) |i| {
+        const e = q.palette.?[q.pixels[i]];
+        for (0..3) |k| total += @abs(@as(f64, @floatFromInt(e[k])) - @as(f64, @floatFromInt(px[i * 4 + k])));
+    }
+    // 2^18 colours spread over the cube: 256 entries, a grid of about 6.3
+    // levels a channel, leave about 10 a sample.
+    try testing.expect(total / (w * w * 3) < 14);
 }
