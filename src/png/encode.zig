@@ -34,44 +34,101 @@ pub const Options = struct {
 
 pub const Error = error{ OutOfMemory, WriteFailed };
 
-/// What a PNG holds: its colour type and depth.
-const Target = struct { colour: decode.Colour, depth: u5 };
+/// What a PNG holds: its colour type and depth, and for a palette its
+/// entries and, where they come from the pixels, each colour's index.
+const Target = struct {
+    colour: decode.Colour,
+    depth: u5,
+    palette: []const [4]u8 = &.{},
+    index: std.AutoHashMapUnmanaged(u32, u8) = .empty,
 
-fn targetOf(image: Image.View, reduce: bool) Target {
+    fn deinit(t: *Target, gpa: Allocator) void {
+        t.index.deinit(gpa);
+    }
+};
+
+/// The fewest bits that index `n` palette entries.
+fn indexDepth(n: usize) u5 {
+    return if (n <= 2) 1 else if (n <= 4) 2 else if (n <= 16) 4 else 8;
+}
+
+fn key(c: [4]u8) u32 {
+    return std.mem.readInt(u32, &c, .little);
+}
+
+/// The smallest lossless form of `image` (with `reduce`): alpha dropped
+/// where every pixel is opaque, gray where every pixel is, 8 bits where
+/// every 16-bit sample is an 8-bit one widened, gray at 1, 2 or 4 bits where
+/// every value is exact there, and a palette where colour or alpha leaves
+/// at most 256 colours.
+fn targetOf(gpa: Allocator, image: Image.View, reduce: bool, palette_out: *std.ArrayList([4]u8)) Error!Target {
     const f = image.format;
-    if (f == .indexed8) return .{ .colour = .palette, .depth = 8 };
+    if (f == .indexed8) {
+        const p = image.palette orelse aegis.assert.never("an indexed view carries its palette");
+        return .{ .colour = .palette, .depth = if (reduce) indexDepth(p.len) else 8, .palette = p };
+    }
     var alpha = f.hasAlpha();
     var colour = switch (f) {
         .gray8, .gray16, .graya8, .graya16 => false,
         else => true,
     };
     var wide = f.wide();
-    if (reduce) {
-        var opaque_all = true;
-        var gray_all = true;
-        var narrow_all = true;
-        for (0..image.height.raw()) |y| {
-            const row = image.row(y);
-            for (0..image.width.raw()) |x| {
-                const v = pixel.get(f, row, x, image.palette);
-                if (v[3] != 65535) opaque_all = false;
-                if (v[0] != v[1] or v[1] != v[2]) gray_all = false;
-                for (v) |s| if (s % 257 != 0) {
-                    narrow_all = false;
-                };
+    if (!reduce) return .{ .colour = colourOf(colour, alpha), .depth = if (wide) 16 else 8 };
+
+    var opaque_all = true;
+    var gray_all = true;
+    var narrow_all = true;
+    // Gray values that are not exact at 4, 2 and 1 bits.
+    var gray_depth: u5 = 1;
+    var colours: std.AutoHashMapUnmanaged(u32, void) = .empty;
+    defer colours.deinit(gpa);
+    var order: std.ArrayList([4]u8) = .empty;
+    defer order.deinit(gpa);
+    var many = false;
+    for (0..image.height.raw()) |y| {
+        const row = image.row(y);
+        for (0..image.width.raw()) |x| {
+            const v = pixel.get(f, row, x, image.palette);
+            if (v[3] != 65535) opaque_all = false;
+            if (v[0] != v[1] or v[1] != v[2]) gray_all = false;
+            for (v) |sample| if (sample % 257 != 0) {
+                narrow_all = false;
+            };
+            const c8: [4]u8 = .{ pixel.narrow(v[0]), pixel.narrow(v[1]), pixel.narrow(v[2]), pixel.narrow(v[3]) };
+            const exact: u5 = if (c8[0] % 255 == 0) 1 else if (c8[0] % 85 == 0) 2 else if (c8[0] % 17 == 0) 4 else 8;
+            gray_depth = @max(gray_depth, exact);
+            if (!many) {
+                const g = try colours.getOrPut(gpa, key(c8));
+                if (!g.found_existing) {
+                    if (colours.count() > 256) many = true else try order.append(gpa, c8);
+                }
             }
         }
-        if (opaque_all) alpha = false;
-        if (gray_all) colour = false;
-        if (narrow_all) wide = false;
     }
-    const c: decode.Colour = if (colour) (if (alpha) .rgba else .rgb) else (if (alpha) .gray_alpha else .gray);
-    return .{ .colour = c, .depth = if (wide) 16 else 8 };
+    if (opaque_all) alpha = false;
+    if (gray_all) colour = false;
+    if (narrow_all) wide = false;
+    if (!colour and !alpha) return .{ .colour = .gray, .depth = if (wide) 16 else gray_depth };
+    if (wide or many) return .{ .colour = colourOf(colour, alpha), .depth = if (wide) 16 else 8 };
+    // A palette: the entries with alpha first, so tRNS stops at the last.
+    for (order.items) |c| if (c[3] != 255) try palette_out.append(gpa, c);
+    for (order.items) |c| if (c[3] == 255) try palette_out.append(gpa, c);
+    var t: Target = .{ .colour = .palette, .depth = indexDepth(palette_out.items.len), .palette = palette_out.items };
+    errdefer t.deinit(gpa);
+    for (palette_out.items, 0..) |c, i| try t.index.put(gpa, key(c), @intCast(i));
+    return t;
+}
+
+fn colourOf(colour: bool, alpha: bool) decode.Colour {
+    return if (colour) (if (alpha) .rgba else .rgb) else (if (alpha) .gray_alpha else .gray);
 }
 
 /// Write `image` as a PNG.
 pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Options) Error!void {
-    const t = targetOf(image, options.reduce);
+    var palette: std.ArrayList([4]u8) = .empty;
+    defer palette.deinit(gpa);
+    var t = try targetOf(gpa, image, options.reduce, &palette);
+    defer t.deinit(gpa);
     const header: decode.Header = .{ .width = image.width, .height = image.height, .depth = t.depth, .colour = t.colour, .interlaced = false };
     const w = image.width.raw();
     const h = image.height.raw();
@@ -87,7 +144,7 @@ pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Op
     @memset(prior, 0);
     const bpp = header.bpp();
     for (0..h) |y| {
-        packRow(image, y, t, current);
+        packRow(image, y, &t, current);
         const out = filtered[y * (1 + rb) ..][0 .. 1 + rb];
         var best: filter.Type = .sub;
         if (options.mode != .fast) {
@@ -129,7 +186,7 @@ pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Op
     ihdr[12] = 0;
     try writeChunk(writer, "IHDR", &ihdr);
     if (t.colour == .palette) {
-        const entries = image.palette orelse aegis.assert.never("an indexed view carries its palette");
+        const entries = t.palette;
         const plte = try gpa.alloc(u8, entries.len * 3);
         defer gpa.free(plte);
         var last_clear: usize = 0;
@@ -154,15 +211,22 @@ pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Op
     try writeChunk(writer, "IEND", "");
 }
 
-/// Row `y` of `image` as `t`'s samples, big-endian where 16 bits.
-fn packRow(image: Image.View, y: usize, t: Target, out: []u8) void {
+/// Row `y` of `image` as `t`'s samples: 16-bit ones big-endian, those
+/// under 8 bits packed most significant first.
+fn packRow(image: Image.View, y: usize, t: *const Target, out: []u8) void {
     const row = image.row(y);
-    if (t.colour == .palette) {
-        @memcpy(out, row[0..out.len]);
-        return;
-    }
-    var o: usize = 0;
+    @memset(out, 0);
+    var bits = Bits{ .out = out };
     for (0..image.width.raw()) |x| {
+        if (t.colour == .palette) {
+            const i: u8 = if (image.format == .indexed8) row[x] else blk: {
+                const v = pixel.get(image.format, row, x, image.palette);
+                const c8: [4]u8 = .{ pixel.narrow(v[0]), pixel.narrow(v[1]), pixel.narrow(v[2]), pixel.narrow(v[3]) };
+                break :blk t.index.get(key(c8)) orelse aegis.assert.never("every colour of the image is in its palette");
+            };
+            bits.put(i, t.depth);
+            continue;
+        }
         const v = pixel.get(image.format, row, x, image.palette);
         const samples: []const u16 = switch (t.colour) {
             .gray => &.{v[0]},
@@ -171,17 +235,33 @@ fn packRow(image: Image.View, y: usize, t: Target, out: []u8) void {
             .rgba => &v,
             .palette => aegis.assert.never("a palette image's rows are its indices (above)"),
         };
-        for (samples) |s| {
-            if (t.depth == 16) {
-                std.mem.writeInt(u16, out[o..][0..2], s, .big);
-                o += 2;
-            } else {
-                out[o] = pixel.narrow(s);
-                o += 1;
-            }
-        }
+        for (samples) |sample| switch (t.depth) {
+            16 => {
+                bits.put(@truncate(sample >> 8), 8);
+                bits.put(@truncate(sample), 8);
+            },
+            8 => bits.put(pixel.narrow(sample), 8),
+            // Gray at 1, 2 or 4 bits: the value is exact there.
+            else => bits.put(@intCast(pixel.narrow(sample) / (255 / ((@as(u16, 1) << @as(u4, @intCast(t.depth))) - 1))), t.depth),
+        };
     }
 }
+
+/// Samples of 1 to 8 bits written into a row, most significant first.
+const Bits = struct {
+    out: []u8,
+    bit: usize = 0,
+
+    fn put(b: *Bits, v: u8, depth: u5) void {
+        if (depth == 8) {
+            b.out[b.bit / 8] = v;
+        } else {
+            const shift: u3 = @intCast(8 - depth - b.bit % 8);
+            b.out[b.bit / 8] |= v << shift;
+        }
+        b.bit += depth;
+    }
+};
 
 fn writeChunk(writer: *Io.Writer, comptime name: *const [4]u8, data: []const u8) Error!void {
     var len: [4]u8 = undefined;
