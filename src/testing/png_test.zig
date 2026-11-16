@@ -194,3 +194,47 @@ fn anyBytes(_: void, case: *shakedown.Case) !void {
 test "fuzz: any bytes and damaged PNGs decode or are refused by name, within the memory limit" {
     try shakedown.check(testing.allocator, {}, anyBytes, .{ .cases = 2000, .seed = 0x9e6 });
 }
+
+test "readRows streams the rows decode gives, in any number at a time, at any stride" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var prng: std.Random.DefaultPrng = .init(21);
+    for ([_]aperture.PixelFormat{ .rgba8, .gray16, .indexed8, .graya8 }) |format| for ([_][2]u32{ .{ 1, 1 }, .{ 70, 45 }, .{ 300, 9 } }) |size| {
+        const image = try randomImage(gpa, prng.random(), format, size[0], size[1], 1);
+        const bytes = try encoded(gpa, image.view(), .{});
+        const whole = try decoded(gpa, bytes, format, .{});
+        for ([_]u32{ 1, 2, 7, 1000 }) |batch| {
+            var r: std.Io.Reader = .fixed(bytes);
+            var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+            defer d.deinit();
+            const row = format.rowBytes(size[0]).raw();
+            const stride = row + 3;
+            const buf = try gpa.alloc(u8, stride * batch);
+            var y: u32 = 0;
+            while (y < size[1]) {
+                const n = try d.readRows(buf, .fromRaw(stride), format);
+                try testing.expect(n > 0);
+                for (0..n) |i| try testing.expectEqualSlices(u8, whole.view().row(y + i), buf[i * stride ..][0..row]);
+                y += n;
+            }
+            try testing.expectEqual(@as(u32, 0), try d.readRows(buf, .fromRaw(stride), format));
+        }
+    };
+}
+
+test "readRows refuses pixel data cut short or running past the rows, as decode does" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var prng: std.Random.DefaultPrng = .init(22);
+    const image = try randomImage(gpa, prng.random(), .rgb8, 40, 40, 0);
+    const bytes = try encoded(gpa, image.view(), .{});
+    for ([_]usize{ 60, 200, bytes.len - 13 }) |cut| {
+        var r: std.Io.Reader = .fixed(bytes[0..cut]);
+        var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+        defer d.deinit();
+        const buf = try gpa.alloc(u8, 40 * 3 * 40);
+        if (d.readRows(buf, .fromRaw(120), .rgb8)) |_| return error.TestUnexpectedResult else |err| try testing.expect(err == error.Truncated or err == error.Invalid);
+    }
+}

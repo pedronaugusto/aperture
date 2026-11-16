@@ -151,6 +151,8 @@ pub const Decoder = struct {
     default_read: bool = false,
     ended: bool = false,
     work: aegis.bounded.Budget(u64),
+    /// Private: `readRows`'s inflate, for an image without interlacing.
+    rows: ?RowStream = null,
 
     /// Read the signature, IHDR and every chunk before the first IDAT.
     /// `io` is unused until concurrent decoding comes; a sequential decoder
@@ -398,16 +400,20 @@ pub const Decoder = struct {
     }
 
     /// Fills as many whole rows as `out` holds, `stride` bytes apart (at
-    /// least a row of `want`); how many. Rows are decoded whole at the first
-    /// call and handed out after.
+    /// least a row of `want`); how many. An image without interlacing is
+    /// inflated row by row as the rows are asked for: the decoder holds its
+    /// 32 KiB window, a row and the row before it. An interlaced image is
+    /// decoded whole at the first call (Adam7's last pass fills every row)
+    /// and handed out after.
     pub fn readRows(d: *Decoder, out: []u8, stride: aegis.units.Bytes(usize), want: pixel.PixelFormat) ReadError!u32 {
         const row_bytes = want.rowBytes(d.header.width.raw());
         aegis.assert.invariant(stride.compare(row_bytes) != .lt, "rows are a stride apart, at least a row long");
-        if (d.image == null) {
-            d.image = try d.decode(want);
+        if (want == .indexed8 and d.header.colour != .palette) return error.Unsupported;
+        // The rows start once; after the last, every call gives none.
+        if (!d.default_read) {
+            if (d.header.interlaced) d.image = try d.decode(want) else d.rows = try d.startRows();
             d.rows_left = d.header.height.raw();
         }
-        const image = &d.image.?;
         const room: aegis.units.Bytes(usize) = .fromRaw(out.len);
         // The rows that fit: one, and one more for each stride after it.
         const past_first = room.sub(row_bytes) catch return 0;
@@ -415,11 +421,111 @@ pub const Decoder = struct {
         const n: u32 = @intCast(@min(d.rows_left, after +| 1));
         for (0..n) |i| {
             const at = stride.mul(i) catch aegis.assert.never("row i starts within out, which holds it");
-            @memcpy(out[at.raw()..][0..row_bytes.raw()], image.view().row(d.next_row + i));
+            const dst = out[at.raw()..][0..row_bytes.raw()];
+            if (d.image) |*image| @memcpy(dst, image.view().row(d.next_row + i)) else try d.nextRow(want, dst);
         }
         d.next_row += n;
         d.rows_left -= n;
+        if (d.rows_left == 0 and d.rows != null) try d.endRows();
         return n;
+    }
+
+    /// Start inflating the first IDAT chunk, its data unread.
+    fn startRows(d: *Decoder) ReadError!RowStream {
+        d.default_read = true;
+        d.first_idat_start = d.chunk.chunkStart();
+        const rb = d.header.rowBytes(d.header.width.raw());
+        const native_row = d.native().rowBytes(d.header.width.raw()).raw();
+        const options: warp.Inflate.Options = .{ .accept = .zlib };
+        try d.charge(options.windowLen() + 2 * (1 + rb) + native_row + RowStream.input_len);
+        const window = try d.gpa.alloc(u8, options.windowLen());
+        errdefer d.gpa.free(window);
+        const buf = try d.gpa.alloc(u8, 2 * (1 + rb) + native_row);
+        errdefer d.gpa.free(buf);
+        @memset(buf, 0);
+        const inflate = warp.Inflate.init(window, options) catch aegis.assert.never("a window of the options' length, which are valid");
+        return .{ .inflate = inflate, .window = window, .buf = buf, .prior = buf[0 .. 1 + rb], .current = buf[1 + rb ..][0 .. 1 + rb], .scratch = buf[2 * (1 + rb) ..] };
+    }
+
+    /// The next row, inflated, unfiltered and written into `dst` in `want`.
+    fn nextRow(d: *Decoder, want: pixel.PixelFormat, dst: []u8) ReadError!void {
+        const s = &d.rows.?;
+        const at = d.first_idat_start;
+        var filled: usize = 0;
+        while (filled < s.current.len) {
+            const step = s.inflate.decode(s.input[s.start..s.end], s.current[filled..]) catch |err| return d.inflateFailed(err, at);
+            s.start += step.in_len;
+            filled += step.out_len;
+            switch (step.status) {
+                .done => if (filled < s.current.len) return d.chunk.fail(error.Truncated, .pixel_data, at),
+                // Every input byte taken and the stream goes on.
+                .need_input => if (!try d.feed(s)) return d.chunk.fail(error.Truncated, .pixel_data, at),
+                .output_full, .block_end, .member_end => {},
+            }
+        }
+        const ft = std.enums.fromInt(filter.Type, s.current[0]) orelse return d.chunk.fail(error.Invalid, .png_filter, at);
+        filter.unfilter(ft, s.current[1..], s.prior[1..], d.header.bpp());
+        d.expand(s.current[1..], d.header.width.raw(), s.scratch);
+        const native_format = d.native();
+        if (want == native_format) @memcpy(dst, s.scratch) else for (0..d.header.width.raw()) |x| {
+            pixel.put(want, dst, x, pixel.get(native_format, s.scratch, x, d.palette));
+        }
+        std.mem.swap([]u8, &s.prior, &s.current);
+    }
+
+    /// After the last row: the stream ends there, its Adler-32 checked;
+    /// more pixel data is `Invalid`, as the one-shot decode finds it.
+    fn endRows(d: *Decoder) ReadError!void {
+        const s = &d.rows.?;
+        const at = d.first_idat_start;
+        var spare: [1]u8 = undefined;
+        while (true) {
+            const step = s.inflate.decode(s.input[s.start..s.end], &spare) catch |err| return d.inflateFailed(err, at);
+            s.start += step.in_len;
+            if (step.out_len != 0) return d.chunk.fail(error.Invalid, .pixel_data, at);
+            switch (step.status) {
+                .done => break,
+                .need_input => if (!try d.feed(s)) return d.chunk.fail(error.Truncated, .pixel_data, at),
+                .output_full, .block_end, .member_end => {},
+            }
+        }
+        // The rest of the last IDAT, and its CRC.
+        if (!s.input_done) try d.chunk.end();
+        s.deinit(d.gpa);
+        d.rows = null;
+    }
+
+    /// More compressed bytes into `s.input`, from the current IDAT or the
+    /// next one; false when the IDAT chunks are done.
+    fn feed(d: *Decoder, s: *RowStream) ReadError!bool {
+        while (!s.input_done) {
+            if (d.chunk.left == 0) {
+                try d.chunk.end();
+                const next = try d.chunk.next() orelse {
+                    s.input_done = true;
+                    return false;
+                };
+                if (!chunks.is(next.type, "IDAT")) {
+                    d.pending = next;
+                    s.input_done = true;
+                    return false;
+                }
+                continue;
+            }
+            const n = @min(s.input.len, d.chunk.left);
+            try d.chunk.data(s.input[0..n]);
+            s.start = 0;
+            s.end = n;
+            return true;
+        }
+        return false;
+    }
+
+    fn inflateFailed(d: *Decoder, err: warp.Inflate.DecodeError, at: u64) ReadError {
+        return switch (err) {
+            error.ChecksumMismatch => d.chunk.fail(error.Corrupt, .pixel_data, at),
+            error.InvalidStream, error.DictionaryMismatch => d.chunk.fail(error.Invalid, .pixel_data, at),
+        };
     }
 
     fn decodeInto(d: *Decoder, out: Image.Mutable) ReadError!void {
@@ -678,6 +784,7 @@ pub const Decoder = struct {
 
     pub fn deinit(d: *Decoder) void {
         d.freeMeta();
+        if (d.rows) |*r| r.deinit(d.gpa);
         if (d.frames) |*f| f.deinit();
         if (d.image) |*image| image.deinit();
         d.* = undefined;
@@ -707,6 +814,29 @@ fn sample(row: []const u8, x: usize, depth: u5) u8 {
     const shift: u3 = @intCast(8 - depth - bit % 8);
     return @truncate((row[bit / 8] >> shift) & ((@as(u16, 1) << @as(u4, @intCast(depth))) - 1));
 }
+
+/// Private: `readRows`'s state for an image without interlacing.
+pub const RowStream = struct {
+    const input_len = 4096;
+
+    inflate: warp.Inflate,
+    window: []u8,
+    /// The two filtered rows (the one being read, the one before it) and
+    /// the native row, in one allocation.
+    buf: []u8,
+    prior: []u8,
+    current: []u8,
+    scratch: []u8,
+    input: [input_len]u8 = undefined,
+    start: usize = 0,
+    end: usize = 0,
+    input_done: bool = false,
+
+    fn deinit(s: *RowStream, gpa: Allocator) void {
+        gpa.free(s.window);
+        gpa.free(s.buf);
+    }
+};
 
 /// Adam7's passes, or the one pass of an image without interlacing; empty
 /// passes skipped.

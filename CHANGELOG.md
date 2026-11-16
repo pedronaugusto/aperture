@@ -10,6 +10,9 @@ All notable changes to aperture are documented here. The format follows
 - PNG decoding (`png.Decoder`, `decode`): every colour type and bit depth, Adam7, palette and
   tRNS, 16-bit samples, the ICC profile inflated within `Limits.metadata`; each chunk's CRC and
   the pixel data's Adler-32 checked; every refusal named in `Diagnostic`.
+- Row-by-row PNG decoding (`png.Decoder.readRows`): an image without interlacing is inflated
+  as its rows are asked for, the decoder holding its 32 KiB window, a row and the row before
+  it; an interlaced one is decoded whole first, as Adam7 needs.
 - APNG frames (`png.Decoder.nextFrame`): each frame composited onto the canvas (`Frames`:
   disposal none, background or previous; blending source or over), with its rectangle and
   delay; acTL's frame count bounded by `Limits.frames`, each frame's pixels charged to
