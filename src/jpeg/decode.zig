@@ -21,6 +21,7 @@ const huffman = @import("huffman.zig");
 const idct = @import("idct.zig");
 const colour = @import("colour.zig");
 const progressive = @import("progressive.zig");
+const smooth = @import("smooth.zig");
 
 pub const Options = struct {
     limits: Limits = .{},
@@ -545,6 +546,7 @@ pub const Decoder = struct {
         var full: [4][]u8 = undefined;
         var made: usize = 0;
         defer for (full[0..made]) |f| d.gpa.free(f);
+        const smoothed = d.smoothing();
         for (d.components[0..d.count], 0..) |*c, ci| {
             const stride: usize = @as(usize, c.blocks_w) * 8;
             try d.charge(stride * c.blocks_h * 8 + w * h);
@@ -554,7 +556,13 @@ pub const Decoder = struct {
             const quant = &(c.quant orelse none);
             for (0..c.blocks_h) |by| for (0..c.blocks_w) |bx| {
                 const b: *const [64]i16 = c.coefs[(by * c.blocks_w + bx) * 64 ..][0..64];
-                idct.islow(b, quant, plane[by * 8 * stride + bx * 8 ..], stride);
+                const out = plane[by * 8 * stride + bx * 8 ..];
+                // libjpeg smooths the blocks it outputs, those coded alone.
+                if (smoothed and by < c.height_blocks and bx < c.width_blocks) {
+                    var estimated = b.*;
+                    smooth.estimate(&estimated, &d.around(c, @intCast(bx), @intCast(by)), quant, &c.coef_bits);
+                    idct.islow(&estimated, quant, out, stride);
+                } else idct.islow(b, quant, out, stride);
             };
             full[ci] = try d.gpa.alloc(u8, w * h);
             made += 1;
@@ -581,6 +589,45 @@ pub const Decoder = struct {
             }
         }
         d.samples_out = out;
+        return out;
+    }
+
+    /// Whether libjpeg smooths the image's blocks: a progressive file whose
+    /// components all allow it and some need it (smooth.judge).
+    fn smoothing(d: *const Decoder) bool {
+        if (!d.progressive) return false;
+        var inexact = false;
+        for (d.components[0..d.count]) |*c| switch (smooth.judge(c.quant, &c.coef_bits)) {
+            .never => return false,
+            .exact => {},
+            .inexact => inexact = true,
+        };
+        return inexact;
+    }
+
+    /// The DC values around block `x`, `y` of `c`, as libjpeg reaches them:
+    /// columns clamped to the blocks coded alone; rows from its virtual
+    /// array, whose last iMCU row it counts in that row's blocks (so a
+    /// last row of fewer blocks than the component's v reaches up as if
+    /// the image were that many blocks per iMCU row), padding rows of
+    /// whole MCUs within reach.
+    fn around(d: *const Decoder, c: *const Component, x: u32, y: u32) smooth.Around {
+        const rows_total = d.mcus_y;
+        const imcu = y / c.v;
+        const in_row = y % c.v;
+        const block_rows: u32 = if (imcu + 1 < rows_total or c.height_blocks % c.v == 0) c.v else c.height_blocks % c.v;
+        const at = imcu * block_rows + in_row;
+        const span = block_rows * rows_total;
+        const up1 = if (at > 0) y - 1 else y;
+        const up2 = if (at > 1) y - 2 else up1;
+        const down1 = if (at + 1 < span) y + 1 else y;
+        const down2 = if (at + 2 < span) y + 2 else down1;
+        const rows = [5]u32{ up2, up1, y, down1, down2 };
+        var out: smooth.Around = undefined;
+        for (rows, 0..) |r, i| for (0..5) |j| {
+            const col = std.math.clamp(@as(i64, x) + @as(i64, @intCast(j)) - 2, 0, c.width_blocks - 1);
+            out[i][j] = c.coefs[(@as(usize, r) * c.blocks_w + @as(usize, @intCast(col))) * 64];
+        };
         return out;
     }
 

@@ -27,8 +27,9 @@ All notable changes to aperture are documented here. The format follows
 - JPEG decoding (`jpeg.Decoder`, `decode`): baseline, extended and progressive Huffman-coded
   8-bit JPEG; gray, YCbCr, RGB, CMYK and YCCK (CMYK and YCCK converted to RGB by `decode`, the
   component samples as libjpeg-turbo gives them from `Decoder.samples`); every sampling of
-  whole ratios, restart intervals; the islow IDCT, fancy upsampling and colour conversion of
-  libjpeg-turbo, bit for bit; `Info.colour_model` names the stored colour model before any
+  whole ratios, restart intervals; the islow IDCT, block smoothing (a progressive file whose
+  later scans are missing has its coefficients not yet sent estimated from neighbouring DC
+  values), fancy upsampling and colour conversion of libjpeg-turbo, bit for bit; `Info.colour_model` names the stored colour model before any
   pixel. Arithmetic coding, 12-bit samples and lossless or hierarchical coding are refused as
   `Unsupported` by name; where libjpeg-turbo recovers from corrupt data with a warning,
   aperture refuses. Coefficients charged to `Limits.memory`, progressive scans to
