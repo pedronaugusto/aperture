@@ -39,7 +39,9 @@ pub const Filter = enum {
             .triangle => @max(0, 1 - ax),
             .catmull_rom => cubic(ax, 0, 0.5),
             .mitchell => cubic(ax, 1.0 / 3.0, 1.0 / 3.0),
-            .lanczos3 => if (ax < 1e-6) 1 else if (ax >= 3) 0 else sinc(ax) * sinc(ax / 3),
+            // Zero at every other whole offset exactly, as sin(pi x) is
+            // there and f32's sin of pi is not.
+            .lanczos3 => if (ax < 1e-6) 1 else if (ax >= 3 or ax == @round(ax)) 0 else sinc(ax) * sinc(ax / 3),
         };
     }
 };

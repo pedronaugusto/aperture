@@ -6,4 +6,5 @@ test {
     _ = @import("testing/pngsuite_test.zig");
     _ = @import("testing/apng_test.zig");
     _ = @import("testing/gif_test.zig");
+    _ = @import("testing/properties_test.zig");
 }
