@@ -16,7 +16,8 @@ const Image = @import("../Image.zig");
 const decode = @import("decode.zig");
 
 pub const Mode = enum {
-    /// Sub on every row, warp level 1.
+    /// Sub on every row, warp level 2 with the `filtered` strategy: warp's
+    /// level 1 parses PNG's filtered rows slower than its level 2 does.
     fast,
     /// Each row's filter chosen, warp level 6 with the `filtered` strategy.
     default,
@@ -151,7 +152,7 @@ pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Op
     }
 
     const level = levelOf(options.mode);
-    var z = try warp.Compressor.init(gpa, .{ .level = level, .strategy = if (options.mode == .fast) .default else .filtered, .max_input = .fromRaw(filtered.len) });
+    var z = try warp.Compressor.init(gpa, .{ .level = level, .strategy = .filtered, .max_input = .fromRaw(filtered.len) });
     defer z.deinit();
     const stream = try gpa.alloc(u8, warp.Compressor.bound(filtered.len, .{}));
     defer gpa.free(stream);
@@ -264,9 +265,9 @@ pub const Encoder = struct {
         const rows = try gpa.alloc(u8, 3 * rb + (1 + rb) + idat_len);
         errdefer gpa.free(rows);
         @memset(rows, 0);
-        var deflate = warp.Deflate.init(gpa, .{ .level = levelOf(options.mode), .strategy = if (options.mode == .fast) .default else .filtered }) catch |err| return switch (err) {
+        var deflate = warp.Deflate.init(gpa, .{ .level = levelOf(options.mode), .strategy = .filtered }) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
-            error.InvalidOptions => aegis.assert.never("a level of 1, 6 or 9 and the default window are valid"),
+            error.InvalidOptions => aegis.assert.never("a level of 2, 6 or 9 and the default window are valid"),
         };
         errdefer deflate.deinit();
         var e: Encoder = .{
@@ -385,7 +386,7 @@ pub const Encoder = struct {
 
 fn levelOf(mode: Mode) u4 {
     return switch (mode) {
-        .fast => 1,
+        .fast => 2,
         .default => 6,
         .small => 9,
     };
