@@ -8,6 +8,7 @@ const testing = std.testing;
 const shakedown = @import("shakedown");
 const aperture = @import("../aperture.zig");
 const pixel = @import("../pixel.zig");
+const aegis = @import("aegis");
 
 /// An image of `format` whose pixels the generator draws, kept to what the
 /// format holds (gray where gray, opaque where no alpha).
@@ -237,4 +238,37 @@ test "readRows refuses pixel data cut short or running past the rows, as decode 
         const buf = try gpa.alloc(u8, 40 * 3 * 40);
         if (d.readRows(buf, .fromRaw(120), .rgb8)) |_| return error.TestUnexpectedResult else |err| try testing.expect(err == error.Truncated or err == error.Invalid);
     }
+}
+
+test "the row-by-row encoder writes a PNG that decodes to the rows given, in bands of any height" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var prng: std.Random.DefaultPrng = .init(31);
+    for ([_]aperture.PixelFormat{ .rgba8, .rgb16, .gray8, .indexed8 }) |format| for ([_]u32{ 1, 3, 64 }) |band| {
+        const image = try randomImage(gpa, prng.random(), format, 50, 70, 1);
+        var file: std.Io.Writer.Allocating = .init(gpa);
+        var e: aperture.png.Encoder = try .init(testing.allocator, &file.writer, .{ .width = image.width, .height = image.height, .format = format, .palette = image.palette }, .{});
+        defer e.deinit();
+        var y: u32 = 0;
+        while (y < 70) : (y += band) {
+            const n = @min(band, 70 - y);
+            try e.writeRows(image.pixels[y * image.stride.raw() ..][0 .. n * image.stride.raw()], image.stride);
+        }
+        var len = try e.finish();
+        var written: aegis.units.Bytes(u64) = undefined;
+        len.take(&written);
+        try testing.expectEqual(@as(u64, file.written().len), written.raw());
+        const back = try decoded(gpa, file.written(), format, .{});
+        try testing.expectEqualSlices(u8, image.pixels, back.pixels);
+    };
+}
+
+test "finishing before every row is written is refused" {
+    var file: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer file.deinit();
+    var e: aperture.png.Encoder = try .init(testing.allocator, &file.writer, .{ .width = .literal(2), .height = .literal(2), .format = .gray8 }, .{});
+    defer e.deinit();
+    try e.writeRows(&.{ 1, 2 }, .fromRaw(2));
+    try testing.expectError(error.RowsMissing, e.finish());
 }

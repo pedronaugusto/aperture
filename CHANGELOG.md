@@ -21,6 +21,10 @@ All notable changes to aperture are documented here. The format follows
   differences, the smallest lossless colour type by default (no alpha, gray at 1 to 16 bits,
   a palette for at most 256 colours, 8 bits for widened 16-bit samples), warp's zlib in three
   modes.
+- Row-by-row PNG encoding (`png.Encoder`: `init`, `writeRows`, `finish`), for an image that
+  never exists whole: the format's own colour type, warp's streaming deflate, IDAT chunks of
+  at most 64 KiB; `finish` refuses missing rows and returns the PNG's length as
+  `aegis.own.MustUse`.
 - Scaling (`resize`): separable resampling with nearest, box, triangle, Catmull-Rom, Mitchell
   and Lanczos-3 filters, in premultiplied alpha, in linear light on request, edges clamped.
 - Palette quantization (`quantize`): at most 2 to 256 colours, cut from the histogram by

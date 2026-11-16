@@ -34,9 +34,10 @@ pub const Options = struct {
 
 pub const Error = error{ OutOfMemory, WriteFailed };
 
-/// What a PNG holds: its colour type and depth, and for a palette its
-/// entries and, where they come from the pixels, each colour's index.
-const Target = struct {
+/// Private: what a PNG holds, its colour type and depth, and for a
+/// palette its entries and, where they come from the pixels, each colour's
+/// index.
+pub const Target = struct {
     colour: decode.Colour,
     depth: u5,
     palette: []const [4]u8 = &.{},
@@ -145,30 +146,11 @@ pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Op
     const bpp = header.bpp();
     for (0..h) |y| {
         packRow(image, y, &t, current);
-        const out = filtered[y * (1 + rb) ..][0 .. 1 + rb];
-        var best: filter.Type = .sub;
-        if (options.mode != .fast) {
-            var best_cost: u64 = std.math.maxInt(u64);
-            for (std.enums.values(filter.Type)) |f| {
-                filter.apply(f, current, prior, bpp, trial);
-                var cost: u64 = 0;
-                for (trial) |b| cost += @abs(@as(i8, @bitCast(b)));
-                if (cost < best_cost) {
-                    best_cost = cost;
-                    best = f;
-                }
-            }
-        }
-        out[0] = @backingInt(best);
-        filter.apply(best, current, prior, bpp, out[1..]);
+        filterRow(options.mode, current, prior, bpp, trial, filtered[y * (1 + rb) ..][0 .. 1 + rb]);
         std.mem.swap([]u8, &prior, &current);
     }
 
-    const level: u4 = switch (options.mode) {
-        .fast => 1,
-        .default => 6,
-        .small => 9,
-    };
+    const level = levelOf(options.mode);
     var z = try warp.Compressor.init(gpa, .{ .level = level, .strategy = if (options.mode == .fast) .default else .filtered, .max_input = .fromRaw(filtered.len) });
     defer z.deinit();
     const stream = try gpa.alloc(u8, warp.Compressor.bound(filtered.len, .{}));
@@ -209,6 +191,204 @@ pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Op
         at += len;
     }
     try writeChunk(writer, "IEND", "");
+}
+
+/// `current` filtered against `prior` into `out` (its filter byte first):
+/// Sub in fast mode, else the filter whose output's bytes, read as signed,
+/// sum to the least in magnitude (libpng's heuristic).
+fn filterRow(mode: Mode, current: []const u8, prior: []const u8, bpp: usize, trial: []u8, out: []u8) void {
+    var best: filter.Type = .sub;
+    if (mode != .fast) {
+        var best_cost: u64 = std.math.maxInt(u64);
+        for (std.enums.values(filter.Type)) |f| {
+            filter.apply(f, current, prior, bpp, trial);
+            var cost: u64 = 0;
+            for (trial) |b| cost += @abs(@as(i8, @bitCast(b)));
+            if (cost < best_cost) {
+                best_cost = cost;
+                best = f;
+            }
+        }
+    }
+    out[0] = @backingInt(best);
+    filter.apply(best, current, prior, bpp, out[1..]);
+}
+
+/// The shape of an image an `Encoder` writes row by row.
+pub const Shape = struct {
+    width: Image.Dimension,
+    height: Image.Dimension,
+    format: pixel.PixelFormat,
+    /// The palette of an `indexed8` image.
+    palette: ?[]const [4]u8 = null,
+};
+
+/// Row by row, for an image that never exists whole (a frame rendered in
+/// bands): the colour type is the format's own (no reduction, which needs
+/// every pixel first), the rows compressed by warp's streaming deflate as
+/// they come and written as IDAT chunks of at most 64 KiB.
+pub const Encoder = struct {
+    gpa: Allocator,
+    writer: *Io.Writer,
+    shape: Shape,
+    mode: Mode,
+    target: Target,
+    header: decode.Header,
+    deflate: warp.Deflate,
+    /// Private: the packed row, the one before it, a filter's trial and
+    /// the filtered row, in one allocation; and IDAT's staging.
+    rows: []u8,
+    prior: []u8,
+    current: []u8,
+    trial: []u8,
+    filtered: []u8,
+    staged: []u8,
+    staged_len: usize = 0,
+    rows_left: u32,
+    written: u64 = 0,
+
+    const idat_len = 1 << 16;
+
+    pub const FinishError = Error || error{
+        /// `finish` before every row was written.
+        RowsMissing,
+    };
+
+    /// Write the signature, IHDR, and PLTE and tRNS for a palette.
+    pub fn init(gpa: Allocator, writer: *Io.Writer, shape: Shape, options: Options) Error!Encoder {
+        var none: std.ArrayList([4]u8) = .empty;
+        const probe: Image.View = .{ .width = shape.width, .height = shape.height, .format = shape.format, .stride = shape.format.rowBytes(shape.width.raw()), .pixels = &.{}, .palette = shape.palette };
+        const t = try targetOf(gpa, probe, false, &none);
+        const header: decode.Header = .{ .width = shape.width, .height = shape.height, .depth = t.depth, .colour = t.colour, .interlaced = false };
+        const rb = header.rowBytes(shape.width.raw());
+        const rows = try gpa.alloc(u8, 3 * rb + (1 + rb) + idat_len);
+        errdefer gpa.free(rows);
+        @memset(rows, 0);
+        var deflate = warp.Deflate.init(gpa, .{ .level = levelOf(options.mode), .strategy = if (options.mode == .fast) .default else .filtered }) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            error.InvalidOptions => aegis.assert.never("a level of 1, 6 or 9 and the default window are valid"),
+        };
+        errdefer deflate.deinit();
+        var e: Encoder = .{
+            .gpa = gpa,
+            .writer = writer,
+            .shape = shape,
+            .mode = options.mode,
+            .target = t,
+            .header = header,
+            .deflate = deflate,
+            .rows = rows,
+            .prior = rows[0..rb],
+            .current = rows[rb..][0..rb],
+            .trial = rows[2 * rb ..][0..rb],
+            .filtered = rows[3 * rb ..][0 .. 1 + rb],
+            .staged = rows[4 * rb + 1 ..][0..idat_len],
+            .rows_left = shape.height.raw(),
+        };
+        try e.out(chunks.signature);
+        try e.writeHeader();
+        return e;
+    }
+
+    fn out(e: *Encoder, bytes: []const u8) Error!void {
+        e.writer.writeAll(bytes) catch return error.WriteFailed;
+        e.written += bytes.len;
+    }
+
+    fn chunk(e: *Encoder, comptime name: *const [4]u8, data: []const u8) Error!void {
+        try writeChunk(e.writer, name, data);
+        e.written += 12 + data.len;
+    }
+
+    fn writeHeader(e: *Encoder) Error!void {
+        var ihdr: [13]u8 = undefined;
+        std.mem.writeInt(u32, ihdr[0..4], e.shape.width.raw(), .big);
+        std.mem.writeInt(u32, ihdr[4..8], e.shape.height.raw(), .big);
+        ihdr[8] = e.target.depth;
+        ihdr[9] = @backingInt(e.target.colour);
+        ihdr[10] = 0;
+        ihdr[11] = 0;
+        ihdr[12] = 0;
+        try e.chunk("IHDR", &ihdr);
+        if (e.target.colour == .palette) try e.writePalette();
+    }
+
+    fn writePalette(e: *Encoder) Error!void {
+        const entries = e.target.palette;
+        var plte: [256 * 3]u8 = undefined;
+        var trns: [256]u8 = undefined;
+        var last_clear: usize = 0;
+        for (entries, 0..) |c, i| {
+            @memcpy(plte[i * 3 ..][0..3], c[0..3]);
+            trns[i] = c[3];
+            if (c[3] != 255) last_clear = i + 1;
+        }
+        try e.chunk("PLTE", plte[0 .. entries.len * 3]);
+        if (last_clear > 0) try e.chunk("tRNS", trns[0..last_clear]);
+    }
+
+    /// Write the next rows: `rows` holds whole rows of the shape's format,
+    /// `stride` bytes apart, top to bottom.
+    pub fn writeRows(e: *Encoder, rows: []const u8, stride: aegis.units.Bytes(usize)) Error!void {
+        const row_bytes = e.shape.format.rowBytes(e.shape.width.raw());
+        aegis.assert.invariant(stride.compare(row_bytes) != .lt, "rows are a stride apart, at least a row long");
+        const room: aegis.units.Bytes(usize) = .fromRaw(rows.len);
+        // Less than a row is no row.
+        if (room.compare(row_bytes) == .lt) return;
+        const past_first = room.sub(row_bytes) catch aegis.assert.never("room holds a row (above)");
+        const after = past_first.ratio(stride) catch aegis.assert.never("a stride is at least a row, never zero");
+        const n: u32 = @intCast(@min(e.rows_left, after +| 1));
+        for (0..n) |i| {
+            const at = stride.mul(i) catch aegis.assert.never("row i starts within rows, which holds it");
+            const one: Image.View = .{ .width = e.shape.width, .height = .literal(1), .format = e.shape.format, .stride = row_bytes, .pixels = rows[at.raw()..][0..row_bytes.raw()], .palette = e.shape.palette };
+            packRow(one, 0, &e.target, e.current);
+            filterRow(e.mode, e.current, e.prior, e.header.bpp(), e.trial, e.filtered);
+            std.mem.swap([]u8, &e.prior, &e.current);
+            var in = e.filtered;
+            while (in.len > 0) {
+                const step = e.deflate.write(in, e.staged[e.staged_len..]);
+                in = in[step.in_len..];
+                e.staged_len += step.out_len;
+                if (e.staged_len == e.staged.len) try e.flushStaged();
+            }
+        }
+        e.rows_left -= n;
+    }
+
+    fn flushStaged(e: *Encoder) Error!void {
+        if (e.staged_len == 0) return;
+        try e.chunk("IDAT", e.staged[0..e.staged_len]);
+        e.staged_len = 0;
+    }
+
+    /// End the stream, write the last IDAT and IEND: the PNG's length,
+    /// to take or acknowledge.
+    pub fn finish(e: *Encoder) FinishError!aegis.own.MustUse(aegis.units.Bytes(u64), "the PNG's length as written: take it, or acknowledge why it is not needed") {
+        if (e.rows_left != 0) return error.RowsMissing;
+        while (true) {
+            const drain = e.deflate.finish(e.staged[e.staged_len..]);
+            e.staged_len += drain.out_len;
+            if (drain.done) break;
+            try e.flushStaged();
+        }
+        try e.flushStaged();
+        try e.chunk("IEND", "");
+        return .init(.fromRaw(e.written));
+    }
+
+    pub fn deinit(e: *Encoder) void {
+        e.deflate.deinit();
+        e.gpa.free(e.rows);
+        e.* = undefined;
+    }
+};
+
+fn levelOf(mode: Mode) u4 {
+    return switch (mode) {
+        .fast => 1,
+        .default => 6,
+        .small => 9,
+    };
 }
 
 /// Row `y` of `image` as `t`'s samples: 16-bit ones big-endian, those

@@ -25,6 +25,10 @@ pub const EncodeMode = encode_.Mode;
 pub const EncodeError = encode_.Error;
 /// Write a whole image as a PNG.
 pub const encode = encode_.encode;
+/// Write a PNG row by row.
+pub const Encoder = encode_.Encoder;
+/// The image an `Encoder` writes.
+pub const Shape = encode_.Shape;
 
 test {
     _ = @import("png/filter.zig");
