@@ -30,5 +30,8 @@ All notable changes to aperture are documented here. The format follows
 - Palette quantization (`quantize`): at most 2 to 256 colours, cut from the histogram by
   median cut and refined by k-means, distances taken premultiplied; Floyd-Steinberg
   dithering on request.
+- Conversion options (`convert`): sRGB decoded to linear light or encoded from it, and
+  compositing onto an opaque background; `orient` applies an EXIF orientation, which PNG's
+  eXIf chunk gives `Info.orientation`.
 - Pixel formats (`PixelFormat`), images owned and borrowed (`Image`, `View`, `Mutable`),
-  `Limits`, `Info`, `detect` and `convert`.
+  `Limits`, `Info` and `detect`.

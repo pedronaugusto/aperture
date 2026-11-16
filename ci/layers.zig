@@ -3,7 +3,8 @@ const gantry = @import("gantry");
 
 pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "vocabulary", .patterns = &.{ "src/pixel.zig", "src/Limits.zig", "src/Diagnostic.zig", "src/Image.zig", "src/Info.zig" } },
-    .{ .name = "pixels", .patterns = &.{ "src/resize.zig", "src/quantize.zig" } },
+    .{ .name = "metadata", .patterns = &.{"src/exif.zig"} },
+    .{ .name = "pixels", .patterns = &.{ "src/resize.zig", "src/quantize.zig", "src/convert.zig", "src/orient.zig" } },
     .{ .name = "frames", .patterns = &.{"src/Frames.zig"} },
     .{ .name = "png parts", .patterns = &.{ "src/png/chunks.zig", "src/png/filter.zig" } },
     .{ .name = "png codecs", .patterns = &.{ "src/png/decode.zig", "src/png/encode.zig" } },
@@ -37,6 +38,9 @@ pub const required = [_][]const u8{
     "src/resize.zig",
     "src/quantize.zig",
     "src/Frames.zig",
+    "src/convert.zig",
+    "src/orient.zig",
+    "src/exif.zig",
     "src/png/chunks.zig",
     "src/png/filter.zig",
     "src/png/decode.zig",

@@ -79,29 +79,21 @@ pub fn decode(gpa: Allocator, io: Io, reader: *Io.Reader, want: PixelFormat, opt
     }
 }
 
-pub const ConvertError = error{
-    /// The images' dimensions differ.
-    SizeMismatch,
-    /// `indexed8` is written by quantizing, not converting.
-    Unsupported,
-};
+const convert_ = @import("convert.zig");
+pub const ConvertOptions = convert_.Options;
+pub const Transfer = convert_.Transfer;
+pub const ConvertError = convert_.Error;
+/// Every pixel of `src` into `dst`'s format: samples widened exactly or
+/// narrowed to nearest, colour to gray by BT.601 luma, premultiplied both
+/// ways, sRGB decoded or encoded and a background composited on request.
+pub const convert = convert_.convert;
 
-/// Every pixel of `src` into `dst`, each converted to `dst`'s format:
-/// samples widened exactly or narrowed to nearest, colour to gray by BT.601
-/// luma, alpha dropped where `dst` has none, premultiplied both ways.
-pub fn convert(dst: Mutable, src: View) ConvertError!void {
-    if (!dst.width.eql(src.width) or !dst.height.eql(src.height)) return error.SizeMismatch;
-    if (dst.format == .indexed8) return error.Unsupported;
-    for (0..src.height.raw()) |y| {
-        const s = src.row(y);
-        const d = dst.row(y);
-        if (dst.format == src.format) {
-            @memcpy(d, s);
-            continue;
-        }
-        for (0..src.width.raw()) |x| pixel_.put(dst.format, d, x, pixel_.get(src.format, s, x, src.palette));
-    }
-}
+const orient_ = @import("orient.zig");
+pub const OrientError = orient_.Error;
+/// `src` turned and mirrored as an EXIF orientation says it is to be seen.
+pub const orient = orient_.orient;
+/// Whether an orientation swaps width and height.
+pub const transposes = orient_.transposes;
 
 test {
     _ = pixel_;
@@ -110,4 +102,7 @@ test {
     _ = resize_;
     _ = quantize_;
     _ = Frames;
+    _ = convert_;
+    _ = orient_;
+    _ = @import("exif.zig");
 }

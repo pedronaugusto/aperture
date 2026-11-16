@@ -17,6 +17,7 @@ const Info = @import("../Info.zig");
 const Limits = @import("../Limits.zig");
 const Diagnostic = @import("../Diagnostic.zig");
 const Frames = @import("../Frames.zig");
+const exif = @import("../exif.zig");
 
 pub const Options = struct {
     limits: Limits = .{},
@@ -131,6 +132,7 @@ pub const Decoder = struct {
     palette: ?[][4]u8 = null,
     key: Key = .none,
     icc: ?[]u8 = null,
+    orientation: Info.Orientation = .normal,
     /// Private: the first IDAT's header, read at `init`, and where it starts.
     first_idat: chunks.Header,
     first_idat_start: u64 = 0,
@@ -199,6 +201,16 @@ pub const Decoder = struct {
                 try d.readTransparency(c, seen_plte);
             } else if (chunks.is(c.type, "iCCP")) {
                 try d.readProfile(c);
+            } else if (chunks.is(c.type, "eXIf")) {
+                // Its orientation, read within the metadata limit; the rest
+                // is the caller's to read elsewhere.
+                if (aegis.units.Bytes(u32).fromRaw(c.len).compare(d.options.limits.metadata) == .gt) return d.chunk.fail(error.TooLarge, .limit, d.chunk.chunkStart());
+                try d.charge(c.len);
+                const block = try d.gpa.alloc(u8, c.len);
+                defer d.gpa.free(block);
+                try d.chunk.data(block);
+                try d.chunk.end();
+                d.orientation = exif.orientation(block) orelse .normal;
             } else if (chunks.is(c.type, "acTL")) {
                 if (c.len != 8 or d.anim != null) return d.chunk.fail(error.Invalid, .png_chunk_length, d.chunk.chunkStart());
                 var b: [8]u8 = undefined;
@@ -352,6 +364,7 @@ pub const Decoder = struct {
             .height = d.header.height,
             .native = d.native(),
             .icc = d.icc,
+            .orientation = d.orientation,
             .frames = if (d.anim) |a| a.frames else null,
             .loops = if (d.anim) |a| a.plays else null,
         };
