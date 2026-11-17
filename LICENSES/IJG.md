@@ -2,9 +2,9 @@
 
 This software is based in part on the work of the Independent JPEG Group.
 
-aperture's JPEG decoder is aperture's own code, written so that its output is
-libjpeg-turbo's bit for bit. Its arithmetic and its decisions follow the IJG's
-libjpeg, as libjpeg-turbo 3.2.1 carries it:
+aperture's JPEG decoder and encoder are aperture's own code, written so that
+their output is libjpeg-turbo's bit for bit. Their arithmetic and their
+decisions follow the IJG's libjpeg, as libjpeg-turbo 3.2.1 carries it:
 
 - `src/jpeg/idct.zig`: the "islow" inverse DCT (jidctint.c), its constants,
   its descaling and its range limit;
@@ -14,7 +14,17 @@ libjpeg, as libjpeg-turbo 3.2.1 carries it:
   checks on a table (jdhuff.c), and the bit buffer's fill policy;
 - `src/jpeg/progressive.zig`: the progressive scans' decoding (jdphuff.c);
 - `src/jpeg/decode.zig`: the markers, scans, colour spaces and checks of
-  jdmarker.c, jdinput.c, jdapimin.c and jdhuff.c.
+  jdmarker.c, jdinput.c, jdapimin.c and jdhuff.c;
+- `src/jpeg/fdct.zig`: the "islow" forward DCT (jfdctint.c), the quality
+  scaling of the standard quantization tables (jcparam.c) and quantization by
+  reciprocals (jcdctmgr.c);
+- `src/jpeg/entropy.zig`: the standard Huffman tables (jstdhuff.c), the
+  optimal tables of jpeg_gen_optimal_table (jchuff.c) and the bit writer's
+  padding;
+- `src/jpeg/encode.zig`: the colour conversion (jccolor.c), downsampling
+  (jcsample.c), padding blocks (jccoefct.c), markers (jcmarker.c),
+  jpeg_simple_progression's scans (jcparam.c) and the sequential and
+  progressive entropy coding (jchuff.c, jcphuff.c).
 
 libjpeg-turbo's LICENSE.md places the libjpeg API library, "including any code
 inherited from libjpeg and any modifications to that code", under the IJG

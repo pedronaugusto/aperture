@@ -7,6 +7,7 @@ test {
     _ = @import("testing/apng_test.zig");
     _ = @import("testing/gif_test.zig");
     _ = @import("testing/jpeg_test.zig");
+    _ = @import("testing/jpeg_encode_test.zig");
     _ = @import("testing/webp_test.zig");
     _ = @import("testing/properties_test.zig");
 }

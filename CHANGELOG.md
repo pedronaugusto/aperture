@@ -57,6 +57,15 @@ All notable changes to aperture are documented here. The format follows
   the canvas; a frame whose data libwebp refuses refused at that frame. The frame count is
   bounded by `Limits.frames`, each frame charged to `Limits.work`, and each frame decoded
   within what remains of `Limits.memory`. The file is read whole, charged to `Limits.memory`.
+- JPEG encoding (`jpeg.encode`, `jpeg.EncodeOptions`): gray, or YCbCr at 4:4:4 or 4:2:0
+  (`jpeg.Subsampling`), at quality 1 to 100 with the standard tables scaled as
+  jpeg_set_quality scales them; the standard Huffman tables, optimized ones
+  (`EncodeOptions.optimize`, the default) or progressive scans as jpeg_simple_progression
+  orders them (`EncodeOptions.progressive`), to libjpeg-turbo 3.2.1's files byte for byte:
+  its JFIF header, islow forward DCT, quantization by reciprocals, colour conversion,
+  downsampling and padding blocks. Any pixel format is encoded from its 8-bit colour.
+  `jpeg.optimalTable` is jpeg_gen_optimal_table's table of symbol counts (codes past 16 bits
+  cut as it cuts them); counts past what it can merge refused as `TooLarge`.
 - `Frames.Delay`'s numerator is 32 bits (a WebP frame's delay is up to 2^24 - 1
   milliseconds); `Frames.clear` clears the whole canvas.
 - PNG encoding (`png.encode`): each row's filter chosen by the least sum of absolute

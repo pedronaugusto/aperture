@@ -15,10 +15,25 @@ pub const ReadError = decode_.ReadError;
 /// The component samples libjpeg-turbo gives (`Decoder.samples`).
 pub const Samples = decode_.Samples;
 
+const encode_ = @import("jpeg/encode.zig");
+
+/// Write an image as a baseline JPEG, byte for byte as libjpeg-turbo
+/// compresses it.
+pub const encode = encode_.encode;
+pub const EncodeOptions = encode_.Options;
+pub const EncodeError = encode_.Error;
+pub const Subsampling = encode_.Subsampling;
+/// The optimal Huffman table of symbol counts, as libjpeg-turbo's
+/// jpeg_gen_optimal_table makes it (for testing against it).
+pub const optimalTable = @import("jpeg/entropy.zig").optimal;
+
 test {
     _ = @import("jpeg/huffman.zig");
     _ = @import("jpeg/idct.zig");
     _ = @import("jpeg/colour.zig");
     _ = @import("jpeg/smooth.zig");
+    _ = @import("jpeg/fdct.zig");
+    _ = @import("jpeg/entropy.zig");
+    _ = encode_;
     _ = decode_;
 }

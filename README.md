@@ -14,7 +14,9 @@ transparency, delay and loop count, frame for frame as Wuffs composites Wuffs's 
 JPEG decodes baseline, extended and progressive files (gray, YCbCr, RGB, CMYK, YCCK, restart
 intervals) to libjpeg-turbo's samples bit for bit. WebP decodes lossless and lossy images (with
 their alpha) to libwebp's pixels bit for bit, and its animations frame for frame as
-WebPAnimDecoder composites them; JPEG encoding comes next.
+WebPAnimDecoder composites them. JPEG encodes gray, 4:4:4 and 4:2:0 at any quality, with the
+standard Huffman tables, optimized ones or progressive scans, to libjpeg-turbo's files byte for
+byte.
 
 ## Usage
 
@@ -81,8 +83,8 @@ aperture assumes sRGB and hands an ICC profile to the caller.
 ## Credits
 
 This software is based in part on the work of the Independent JPEG Group. aperture's JPEG
-decoder follows the arithmetic of the IJG's libjpeg, as libjpeg-turbo carries it, so that its
-samples are libjpeg-turbo's; [LICENSES/IJG.md](LICENSES/IJG.md) names what follows it and holds
+decoder and encoder follow the arithmetic of the IJG's libjpeg, as libjpeg-turbo carries it, so
+that their samples and files are libjpeg-turbo's; [LICENSES/IJG.md](LICENSES/IJG.md) names what follows it and holds
 the IJG's terms.
 
 ## Licence
