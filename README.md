@@ -12,8 +12,8 @@ conversion, APNG frames, row-by-row decoding and encoding, scaling and quantizat
 to Wuffs's pixels bit for bit. GIF decodes every frame composited, with its disposal,
 transparency, delay and loop count, frame for frame as Wuffs composites Wuffs's test GIFs.
 JPEG decodes baseline, extended and progressive files (gray, YCbCr, RGB, CMYK, YCCK, restart
-intervals) to libjpeg-turbo's samples bit for bit. WebP decodes lossless images to libwebp's
-pixels bit for bit; its lossy images and animations, then JPEG encoding, come next.
+intervals) to libjpeg-turbo's samples bit for bit. WebP decodes lossless and lossy images (with
+their alpha) to libwebp's pixels bit for bit; its animations, then JPEG encoding, come next.
 
 ## Usage
 

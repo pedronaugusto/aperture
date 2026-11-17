@@ -1,8 +1,8 @@
 //! WebP against libwebp 1.6.0 (testdata/webp.corpus, captured in trials
-//! aperture/webp): every lossless still libwebp decodes, aperture decodes
-//! to the same RGBA bit for bit; every file libwebp refuses, aperture
-//! refuses. Lossy stills and animations aperture refuses as `Unsupported`
-//! by name until their decoders land.
+//! aperture/webp): every still libwebp decodes, lossless or lossy (with its
+//! ALPH alpha), aperture decodes to the same RGBA bit for bit; every file
+//! libwebp refuses, aperture refuses. Animations aperture refuses as
+//! `Unsupported` by name until their decoder lands.
 
 const std = @import("std");
 const testing = std.testing;
@@ -11,7 +11,7 @@ const shakedown = @import("shakedown");
 
 const corpus = @embedFile("webp.corpus");
 
-const Outcome = enum { matched, refused_as_libwebp, unsupported_by_name, differs };
+const Outcome = enum { matched_lossless, matched_lossy, matched_lossy_alpha, refused_as_libwebp, unsupported_by_name, differs };
 
 fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     var diagnostic: aperture.Diagnostic = .{};
@@ -33,7 +33,7 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     _ = f.next();
     const w = try std.fmt.parseInt(u32, f.next().?, 10);
     const h = try std.fmt.parseInt(u32, f.next().?, 10);
-    _ = f.next(); // alpha
+    const alpha = f.next().?;
     const format = f.next().?;
     const animated = f.next().?;
     for (0..5) |_| _ = f.next(); // frames, loops, background, decoded, refused at
@@ -41,7 +41,7 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     // An animation WebPAnimDecoder refused at its first frame has none.
     const hash = f.next() orelse "";
     if (refusal) |err| {
-        if (err == error.Unsupported and ((diagnostic.reason == .webp_animation and std.mem.eql(u8, animated, "1")) or (diagnostic.reason == .webp_lossy and std.mem.eql(u8, format, "1")))) return .unsupported_by_name;
+        if (err == error.Unsupported and diagnostic.reason == .webp_animation and std.mem.eql(u8, animated, "1")) return .unsupported_by_name;
         std.debug.print("{s}: refused with {t} ({t} at {d}), libwebp decoded it\n", .{ name, err, diagnostic.reason, diagnostic.offset.raw() });
         return .differs;
     }
@@ -53,7 +53,8 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
         std.debug.print("{s}: pixels differ from libwebp's ({d}x{d})\n", .{ name, i.width.raw(), i.height.raw() });
         return .differs;
     }
-    return .matched;
+    if (!std.mem.eql(u8, format, "1")) return .matched_lossless;
+    return if (std.mem.eql(u8, alpha, "1")) .matched_lossy_alpha else .matched_lossy;
 }
 
 /// The corpus's records as name, file and verdict.
@@ -73,13 +74,15 @@ fn records(gpa: std.mem.Allocator) ![]const [3][]const u8 {
     return out.toOwnedSlice(gpa);
 }
 
-test "libwebp's corpus: every lossless still bit for bit, every refusal refused" {
+test "libwebp's corpus: every still bit for bit, every refusal refused" {
     const all = try records(testing.allocator);
     defer testing.allocator.free(all);
     var counts: std.EnumArray(Outcome, usize) = .initFill(0);
     for (all) |rec| counts.getPtr(try check(rec[0], rec[1], rec[2])).* += 1;
     try testing.expectEqual(@as(usize, 0), counts.get(.differs));
-    try testing.expect(counts.get(.matched) >= 200);
+    try testing.expect(counts.get(.matched_lossless) >= 200);
+    try testing.expect(counts.get(.matched_lossy) >= 100);
+    try testing.expect(counts.get(.matched_lossy_alpha) >= 200);
 }
 
 /// Any bytes, or a corpus file damaged, decode or are refused with a named

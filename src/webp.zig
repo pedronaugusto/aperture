@@ -1,5 +1,5 @@
-//! WebP decoding, as libwebp decodes it: lossless (VP8L) images bit for
-//! bit; lossy (VP8) images and animations follow.
+//! WebP decoding, as libwebp decodes it: lossless (VP8L) and lossy (VP8,
+//! with its ALPH alpha) images bit for bit; animations follow.
 
 const decode_ = @import("webp/decode.zig");
 
@@ -12,5 +12,7 @@ pub const ReadError = decode_.ReadError;
 
 test {
     _ = @import("webp/vp8l.zig");
+    _ = @import("webp/vp8.zig");
+    _ = @import("webp/alpha.zig");
     _ = decode_;
 }

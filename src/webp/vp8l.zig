@@ -6,7 +6,9 @@
 //! over-full or incomplete, is refused; one symbol is a code of no bits.
 //! Reading past the data is refused once more than eight bytes' worth or
 //! more than the data's bits are read (libwebp's 64-bit window): until then
-//! the bits past the end are zero.
+//! the bits past the end are zero. Past that, where a stream may still be
+//! taken (an ALPH chunk's ending in its last pixel), the reads are
+//! libwebp's: its window read again from its start.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -33,46 +35,85 @@ pub fn header(data: []const u8) ?Header {
     return .{ .width = (v & 0x3fff) + 1, .height = ((v >> 14) & 0x3fff) + 1, .alpha = (v >> 28) & 1 == 1 };
 }
 
-/// The bits of a VP8L bitstream, least significant first.
+/// The bits of a VP8L bitstream, least significant first, as libwebp's
+/// VP8LBitReader gives them.
 pub const Bits = struct {
     data: []const u8,
-    /// Bits consumed.
+    /// Bits consumed: libwebp's bit position, counted from the stream's
+    /// start.
     at: u64 = 0,
     /// The most that may be consumed: the data's bits, or 64 for data
     /// shorter than eight bytes (libwebp's window is loaded whole).
     limit: u64,
+    /// libwebp's end of stream: set by a read of extra bits that passes
+    /// `limit` (or a refill after one), which also starts its window over.
+    eos: bool = false,
+    /// Where the reading had got to when `eos` was set, for the diagnostic.
+    ended_at: u64 = 0,
 
     pub fn init(data: []const u8) Bits {
         return .{ .data = data, .limit = @max(@as(u64, data.len) * 8, 64) };
     }
 
-    /// The next `n` bits (at most 24) without consuming them, zeros past
-    /// the data.
+    /// Where libwebp's 64-bit window starts once the data is all in it.
+    fn start(b: *const Bits) u64 {
+        return b.limit - 64;
+    }
+
     fn peek(b: *const Bits, n: u5) u32 {
-        const byte = b.at >> 3;
+        return b.peekAt(b.at, n);
+    }
+
+    /// The `n` bits (at most 24) from `from`: zeros past the data; at or
+    /// past `limit`, from the window's start again, as libwebp's shift of
+    /// its window by its bit position taken mod 64 has them.
+    fn peekAt(b: *const Bits, from: u64, n: u5) u32 {
+        var pos = from;
+        if (pos >= b.limit) pos = b.start() + ((pos - b.start()) & 63);
+        const byte = pos >> 3;
         var w: u64 = 0;
         for (0..5) |i| {
             const at = byte + i;
             if (at < b.data.len) w |= @as(u64, b.data[@intCast(at)]) << @intCast(8 * i);
         }
-        const v: u32 = @truncate(w >> @intCast(b.at & 7));
+        const v: u32 = @truncate(w >> @intCast(pos & 7));
         return v & ((@as(u32, 1) << n) - 1);
     }
 
+    /// libwebp's VP8LReadBits: `n` bits, or 0 once at the end of stream;
+    /// a read that passes `limit` ends it and starts the window over.
     pub fn read(b: *Bits, n: u5) u32 {
+        if (b.eos) {
+            b.at = b.start();
+            return 0;
+        }
         const v = b.peek(n);
         b.at += n;
+        if (b.at > b.limit) b.end();
         return v;
+    }
+
+    fn end(b: *Bits) void {
+        if (!b.eos) b.ended_at = b.at;
+        b.eos = true;
+        b.at = b.start();
+    }
+
+    /// libwebp's VP8LFillBitWindow at the end of the data: past `limit`, or
+    /// at the end of stream with half the window read, the stream ends (or
+    /// stays ended) and the window starts over.
+    fn fill(b: *Bits) void {
+        if ((b.eos or b.at > b.limit) and b.at - b.start() >= 32) b.end();
     }
 
     /// Whether more has been read than there is.
     pub fn over(b: *const Bits) bool {
-        return b.at > b.limit;
+        return b.eos or b.at > b.limit;
     }
 
     /// The byte of the data being read, for the diagnostic.
     pub fn offset(b: *const Bits) u64 {
-        return b.at >> 3;
+        return (if (b.eos) b.ended_at else b.at) >> 3;
     }
 };
 
@@ -85,7 +126,8 @@ const Code = struct {
 
     fn decode(c: *const Code, b: *Bits) u16 {
         if (c.single) |s| return s;
-        const word = b.peek(15);
+        // libwebp's two lookups: eight bits, then the rest from eight on.
+        const word = b.peek(8) | (b.peekAt(b.at + 8, 7) << 8);
         var code: i32 = 0;
         var first: i32 = 0;
         var index: i32 = 0;
@@ -197,6 +239,11 @@ pub const Decoder = struct {
     owned: std.ArrayList([]u32) = .empty,
     owned16: std.ArrayList([]u16) = .empty,
     owned_groups: std.ArrayList([]Group) = .empty,
+    /// An `ALPH` chunk's stream (`alpha`).
+    alpha_stream: bool = false,
+    /// Decoded as libwebp decodes such alpha a byte a pixel, which lets
+    /// the stream end inside the last pixel's code.
+    lenient: bool = false,
 
     pub fn init(gpa: Allocator, budget: *aegis.bounded.Budget(usize), data: []const u8, base: u64) Decoder {
         return .{ .gpa = gpa, .budget = budget, .bits = .init(data), .base = base };
@@ -255,13 +302,23 @@ pub const Decoder = struct {
         var w = width;
         while (d.bits.read(1) == 1) try d.transform(&w, height);
         var out = try d.entropyImage(w, height, true);
-        if (d.bits.over()) return d.invalid();
+        if (d.bits.over() and !d.lenient) return d.invalid();
         var i = d.count;
         while (i > 0) {
             i -= 1;
             try d.undo(&d.transforms[i], &out, height);
         }
         return out;
+    }
+
+    /// An `ALPH` chunk's stream: `stream`, but where libwebp decodes the
+    /// alpha a byte a pixel (colour indexing its only transform, no colour
+    /// cache, every red, blue and alpha code of one symbol), its
+    /// DecodeAlphaData refuses a stream that ends early only while pixels
+    /// are left: one that runs out in its last pixel's code is taken.
+    pub fn alpha(d: *Decoder, width: u32, height: u32) Error![]u32 {
+        d.alpha_stream = true;
+        return d.stream(width, height);
     }
 
     fn transform(d: *Decoder, w: *u32, height: u32) Error!void {
@@ -319,9 +376,14 @@ pub const Decoder = struct {
         }
         if (d.bits.over()) return d.invalid();
         const groups = try d.readGroups(groups_count, cache_bits, meta);
+        if (top and d.alpha_stream and d.count == 1 and d.transforms[0].kind == .colour_indexing and cache_bits == 0) {
+            d.lenient = for (groups) |g| {
+                if (g[1].single == null or g[2].single == null or g[3].single == null) break false;
+            } else true;
+        }
         const n = @as(usize, width) * height;
         const out = try d.alloc(n);
-        try d.pixels(out, width, groups, meta, meta_bits, cache_bits);
+        try d.pixels(out, width, groups, meta, meta_bits, cache_bits, top and d.lenient);
         return out;
     }
 
@@ -427,7 +489,9 @@ pub const Decoder = struct {
     }
 
     /// The pixels of an entropy-coded image, `width` wide, into `out`.
-    fn pixels(d: *Decoder, out: []u32, width: u32, groups: []const Group, meta: []const u32, meta_bits: u5, cache_bits: u5) Error!void {
+    /// `lenient`: reading past the data is refused only while pixels are
+    /// left after the code read (libwebp's DecodeAlphaData).
+    fn pixels(d: *Decoder, out: []u32, width: u32, groups: []const Group, meta: []const u32, meta_bits: u5, cache_bits: u5, lenient: bool) Error!void {
         var cache_store: [2048]u32 = undefined;
         const cache: []u32 = if (cache_bits > 0) cache_store[0 .. @as(usize, 1) << cache_bits] else &.{};
         @memset(cache, 0);
@@ -443,16 +507,19 @@ pub const Decoder = struct {
             if (code < literal_codes) {
                 const red = g[1].decode(&d.bits);
                 const blue = g[2].decode(&d.bits);
-                const alpha = g[3].decode(&d.bits);
-                if (d.bits.over()) return d.invalid();
-                out[i] = (@as(u32, alpha) << 24) | (@as(u32, red) << 16) | (@as(u32, code) << 8) | blue;
+                const alpha_value = g[3].decode(&d.bits);
+                if (d.bits.over() and !(lenient and i + 1 == out.len)) return d.invalid();
+                out[i] = (@as(u32, alpha_value) << 24) | (@as(u32, red) << 16) | (@as(u32, code) << 8) | blue;
                 i += 1;
             } else if (code < length_limit) {
                 const length = d.copyDistance(code - literal_codes);
-                const dist_code = d.copyDistance(g[4].decode(&d.bits));
+                const dist_symbol = g[4].decode(&d.bits);
+                d.bits.fill();
+                const dist_code = d.copyDistance(dist_symbol);
                 const dist = planeDistance(width, dist_code);
-                if (d.bits.over()) return d.invalid();
+                if (d.bits.over() and !lenient) return d.invalid();
                 if (i < dist or out.len - i < length) return d.invalid();
+                if (d.bits.over() and i + length < out.len) return d.invalid();
                 for (0..length) |k| out[i + k] = out[i + k - dist];
                 i += length;
             } else {

@@ -88,8 +88,14 @@ pub const Reason = enum {
     /// transform twice, a prefix code over-full or incomplete, a copy from
     /// before the image or past its end, or data read past its end.
     webp_lossless,
-    /// Unsupported, for now: lossy (VP8) coding.
+    /// A VP8 bitstream libwebp refuses: not a key frame, a profile past 3, a
+    /// frame not shown, the first partition as long as its chunk or longer,
+    /// no width or height, or a partition read past its end.
     webp_lossy,
+    /// An ALPH chunk libwebp refuses: a compression method past 1, levels
+    /// pre-processing past 1, reserved bits set, raw alpha shorter than the
+    /// image, or VP8L-coded alpha refused as `webp_lossless` would be.
+    webp_alpha,
     /// Unsupported, for now: animation.
     webp_animation,
 };

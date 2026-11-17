@@ -5,8 +5,9 @@
 //! file is read first, charged to `Limits.memory`: libwebp reads a VP8L
 //! bitstream on past its chunk, to the end of the file, and so does this.
 //!
-//! Lossless (VP8L) images decode; lossy (VP8) ones and animations are
-//! `Unsupported`, by name, until their decoders land.
+//! Lossless (VP8L) and lossy (VP8) images decode, the last with the alpha
+//! of its ALPH chunk; animations are `Unsupported`, by name, until their
+//! decoder lands.
 
 const std = @import("std");
 const Io = std.Io;
@@ -19,6 +20,8 @@ const Limits = @import("../Limits.zig");
 const Diagnostic = @import("../Diagnostic.zig");
 const exif = @import("../exif.zig");
 const vp8l = @import("vp8l.zig");
+const vp8 = @import("vp8.zig");
+const alpha = @import("alpha.zig");
 
 pub const Options = struct {
     limits: Limits = .{},
@@ -29,7 +32,7 @@ pub const InitError = error{
     /// Not a WebP libwebp reads, or one whose container breaks its rules
     /// (the diagnostic names which).
     Invalid,
-    /// Lossy coding or animation, for now.
+    /// Animation, for now.
     Unsupported,
     /// The file or the image passes `Limits`.
     TooLarge,
@@ -133,6 +136,9 @@ pub const Decoder = struct {
         if (vp8x and flags & flag_animation != 0) return fail(o, error.Unsupported, .webp_animation, 0);
         if (file.len - at < 4) return fail(o, error.Truncated, .truncated, file.len);
         var c: Container = .{ .bitstream = &.{}, .at = 0, .lossless = false };
+        // The image chunk's size, or the rest of the file for a bare
+        // bitstream (libwebp's compressed_size).
+        var chunk_size: u64 = 0;
         if ((riff > 0 and vp8x) or (riff == 0 and !vp8x and std.mem.eql(u8, file[at..][0..4], "ALPH"))) {
             var total: u64 = 4 + 8 + 10;
             while (true) {
@@ -162,20 +168,29 @@ pub const Decoder = struct {
             if (riff >= 12 and size > riff - 12) return fail(o, error.Invalid, .webp_chunk, at);
             if (size > file.len - at - 8) return fail(o, error.Truncated, .truncated, file.len);
             c.lossless = tag[3] == 'L';
+            chunk_size = size;
             at += 8;
         } else {
             // A bare bitstream: VP8L by its signature, else VP8.
             c.lossless = vp8l.header(file[at..]) != null;
+            chunk_size = file.len - at;
         }
         c.bitstream = file[at..];
         c.at = at;
-        if (!c.lossless) return fail(o, error.Unsupported, .webp_lossy, at);
-        if (c.bitstream.len < 5) return fail(o, error.Truncated, .truncated, file.len);
-        const h = vp8l.header(c.bitstream) orelse return fail(o, error.Invalid, .webp_lossless, at);
-        if (vp8x and (canvas[0] != h.width or canvas[1] != h.height)) return fail(o, error.Invalid, .webp_chunk, 0);
-        d.width = Image.Dimension.init(h.width) catch return fail(o, error.Invalid, .dimensions, at);
-        d.height = Image.Dimension.init(h.height) catch return fail(o, error.Invalid, .dimensions, at);
-        const pixels = aegis.units.Count(Limits.Pixel, u64).fromRaw(h.width).mul(h.height) catch aegis.assert.never("2^14 by 2^14 pixels fit a u64");
+        var size: [2]u32 = undefined;
+        if (c.lossless) {
+            if (c.bitstream.len < 5) return fail(o, error.Truncated, .truncated, file.len);
+            const h = vp8l.header(c.bitstream) orelse return fail(o, error.Invalid, .webp_lossless, at);
+            size = .{ h.width, h.height };
+        } else {
+            if (c.bitstream.len < vp8.frame_header_size) return fail(o, error.Truncated, .truncated, file.len);
+            const h = vp8.header(c.bitstream, chunk_size) orelse return fail(o, error.Invalid, .webp_lossy, at);
+            size = .{ h.width, h.height };
+        }
+        if (vp8x and (canvas[0] != size[0] or canvas[1] != size[1])) return fail(o, error.Invalid, .webp_chunk, 0);
+        d.width = Image.Dimension.init(size[0]) catch return fail(o, error.Invalid, .dimensions, at);
+        d.height = Image.Dimension.init(size[1]) catch return fail(o, error.Invalid, .dimensions, at);
+        const pixels = aegis.units.Count(Limits.Pixel, u64).fromRaw(size[0]).mul(size[1]) catch aegis.assert.never("2^14 by 2^14 pixels fit a u64");
         if (pixels.compare(o.limits.pixels) == .gt) return fail(o, error.TooLarge, .limit, at);
         d.container = c;
     }
@@ -195,6 +210,7 @@ pub const Decoder = struct {
     /// allocator.
     pub fn decode(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
         if (want == .indexed8) return error.Unsupported;
+        if (!d.container.lossless) return d.lossy(want);
         const w = d.width.raw();
         const h = d.height.raw();
         var l = vp8l.Decoder.init(d.gpa, &d.budget, d.container.bitstream, d.container.at);
@@ -204,11 +220,7 @@ pub const Decoder = struct {
             error.TooLarge => fail(d.options, error.TooLarge, .limit, l.offset()),
             error.OutOfMemory => error.OutOfMemory,
         };
-        const stride = want.rowBytes(w);
-        const size = stride.mul(h) catch return fail(d.options, error.TooLarge, .limit, 0);
-        d.budget.consume(size.raw()) catch return fail(d.options, error.TooLarge, .limit, 0);
-        const px = try d.gpa.alloc(u8, size.raw());
-        var image: Image = .{ .gpa = d.gpa, .width = d.width, .height = d.height, .format = want, .stride = stride, .pixels = px };
+        var image = try d.output(want);
         for (0..h) |y| {
             const row = image.mutable().row(y);
             for (0..w) |x| {
@@ -218,6 +230,58 @@ pub const Decoder = struct {
             }
         }
         return image;
+    }
+
+    /// The image of a VP8 bitstream: decoded, upsampled to RGB as dwebp
+    /// does, its ALPH chunk's alpha (or opaque) beside.
+    fn lossy(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
+        const w = d.width.raw();
+        const h = d.height.raw();
+        var v = vp8.Decoder.init(d.gpa, &d.budget, d.container.bitstream);
+        defer v.deinit();
+        const frame = v.decode() catch |err| return switch (err) {
+            error.Invalid => fail(d.options, error.Invalid, if (v.failure == .truncated) .truncated else .webp_lossy, d.container.at + v.failed_at),
+            error.TooLarge => fail(d.options, error.TooLarge, .limit, d.container.at),
+            error.OutOfMemory => error.OutOfMemory,
+        };
+        const n = @as(usize, w) * h;
+        d.budget.consume(n * 5) catch return fail(d.options, error.TooLarge, .limit, 0);
+        const rgba = try d.gpa.alloc(u8, n * 4);
+        defer d.gpa.free(rgba);
+        vp8.rgba(&frame, rgba);
+        if (d.container.alpha) |chunk| {
+            const plane = try d.gpa.alloc(u8, n);
+            defer d.gpa.free(plane);
+            const base = @intFromPtr(chunk.ptr) - @intFromPtr(d.file.ptr);
+            var failed_at: u64 = base;
+            alpha.decode(d.gpa, &d.budget, chunk, base, w, h, plane, &failed_at) catch |err| return switch (err) {
+                error.Invalid => fail(d.options, error.Invalid, .webp_alpha, failed_at),
+                error.TooLarge => fail(d.options, error.TooLarge, .limit, base),
+                error.OutOfMemory => error.OutOfMemory,
+            };
+            for (plane, 0..) |a, i| rgba[4 * i + 3] = a;
+        }
+        var image = try d.output(want);
+        for (0..h) |y| {
+            const row = image.mutable().row(y);
+            for (0..w) |x| {
+                const c = rgba[4 * (y * w + x) ..][0..4];
+                pixel.put(want, row, x, .{ pixel.widen(c[0]), pixel.widen(c[1]), pixel.widen(c[2]), pixel.widen(c[3]) });
+            }
+        }
+        return image;
+    }
+
+    /// An image of the decoder's size in `want`, its pixels charged to the
+    /// budget and not yet written.
+    fn output(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
+        const w = d.width.raw();
+        const h = d.height.raw();
+        const stride = want.rowBytes(w);
+        const size = stride.mul(h) catch return fail(d.options, error.TooLarge, .limit, 0);
+        d.budget.consume(size.raw()) catch return fail(d.options, error.TooLarge, .limit, 0);
+        const px = try d.gpa.alloc(u8, size.raw());
+        return .{ .gpa = d.gpa, .width = d.width, .height = d.height, .format = want, .stride = stride, .pixels = px };
     }
 
     pub fn deinit(d: *Decoder) void {

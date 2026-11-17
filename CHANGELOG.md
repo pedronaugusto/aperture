@@ -34,14 +34,21 @@ All notable changes to aperture are documented here. The format follows
   `Unsupported` by name; where libjpeg-turbo recovers from corrupt data with a warning,
   aperture refuses. Coefficients charged to `Limits.memory`, progressive scans to
   `Limits.scans`.
-- WebP decoding (`webp.Decoder`, `decode`), lossless (VP8L) so far: the RIFF container as
-  libwebp reads it (VP8X and the chunks before the image, a bare VP8L bitstream, the ICC
-  profile and EXIF orientation in `Info`); the predictor, cross-colour, subtract-green and
-  colour-indexing transforms, the colour cache, meta prefix codes and LZ77 copies, to
-  libwebp 1.6.0's pixels bit for bit, and its refusals: a transform twice, a prefix code
-  over-full or incomplete, a copy outside the image, data read past its end. Lossy (VP8)
-  images and animations are `Unsupported` by name until their decoders land. The file is
-  read whole, charged to `Limits.memory`.
+- WebP decoding (`webp.Decoder`, `decode`), stills so far: the RIFF container as libwebp
+  reads it (VP8X and the chunks before the image, a bare VP8 or VP8L bitstream, the ICC
+  profile and EXIF orientation in `Info`), to libwebp 1.6.0's pixels bit for bit as dwebp
+  gives them, and its refusals. Lossless (VP8L): the predictor, cross-colour,
+  subtract-green and colour-indexing transforms, the colour cache, meta prefix codes and
+  LZ77 copies; refused: a transform twice, a prefix code over-full or incomplete, a copy
+  outside the image, data read past its end. Lossy (VP8): a key frame's segments,
+  quantizers and coefficient tokens in up to eight partitions, the 16x16, 4x4 and chroma
+  predictions, the inverse transforms, the simple and normal loop filters, then fancy
+  upsampling to RGB; refused where libwebp's partition readers run out, as libwebp reads on
+  a 64-bit machine. Its ALPH chunk's alpha: raw or VP8L-coded (a stream libwebp decodes a byte
+  a pixel may end in its last pixel, read as libwebp reads past its data), unfiltered
+  horizontally, vertically or by gradient.
+  Animations are `Unsupported` by name until their decoder lands. The file is read whole,
+  charged to `Limits.memory`.
 - PNG encoding (`png.encode`): each row's filter chosen by the least sum of absolute
   differences, the smallest lossless colour type by default (no alpha, gray at 1 to 16 bits,
   a palette for at most 256 colours, 8 bits for widened 16-bit samples), warp's zlib in three
