@@ -1,13 +1,20 @@
-//! WebP decoding, as libwebp 1.6.0 decodes a file with dwebp's defaults:
-//! the RIFF container read as its WebPDecode reads it (a VP8X chunk and the
-//! chunks after it up to the image's; a bare VP8 or VP8L bitstream without
-//! RIFF; an `ALPH` chunk before a bare VP8 one), then the image. The whole
-//! file is read first, charged to `Limits.memory`: libwebp reads a VP8L
-//! bitstream on past its chunk, to the end of the file, and so does this.
+//! WebP decoding, as libwebp 1.6.0 decodes a file with dwebp's defaults
+//! and its animations as WebPAnimDecoder composites them: the RIFF
+//! container read as WebPGetFeatures reads it (container.zig), then a
+//! still image, or an animation's chunks as WebPDemux reads them
+//! (demux.zig) and its frames one by one. The whole file is read first,
+//! charged to `Limits.memory`: libwebp reads a VP8L bitstream on past its
+//! chunk, to the end of the file, and so does this.
 //!
 //! Lossless (VP8L) and lossy (VP8) images decode, the last with the alpha
-//! of its ALPH chunk; animations are `Unsupported`, by name, until their
-//! decoder lands.
+//! of its ALPH chunk. An animation's frames are composited onto the canvas
+//! (`Frames`) as WebPAnimDecoder composites them in RGBA: a key frame
+//! (the first; one covering the canvas without alpha or blending; one
+//! after a frame disposed to the background that covered the canvas or was
+//! itself a key frame) starts from a clear canvas and is not blended;
+//! another starts from the last canvas, its disposal applied, and is
+//! blended where it has alpha below 255 and the last frame's disposal did
+//! not clear the canvas under it, in 8 bits, with libwebp's arithmetic.
 
 const std = @import("std");
 const Io = std.Io;
@@ -18,10 +25,12 @@ const Image = @import("../Image.zig");
 const Info = @import("../Info.zig");
 const Limits = @import("../Limits.zig");
 const Diagnostic = @import("../Diagnostic.zig");
-const exif = @import("../exif.zig");
+const Frames = @import("../Frames.zig");
 const vp8l = @import("vp8l.zig");
 const vp8 = @import("vp8.zig");
 const alpha = @import("alpha.zig");
+const container = @import("container.zig");
+const demux = @import("demux.zig");
 
 pub const Options = struct {
     limits: Limits = .{},
@@ -32,8 +41,6 @@ pub const InitError = error{
     /// Not a WebP libwebp reads, or one whose container breaks its rules
     /// (the diagnostic names which).
     Invalid,
-    /// Animation, for now.
-    Unsupported,
     /// The file or the image passes `Limits`.
     TooLarge,
     Truncated,
@@ -49,27 +56,21 @@ pub const ReadError = error{
     Unsupported,
 };
 
-/// The largest chunk payload libwebp takes (its MAX_CHUNK_PAYLOAD).
-const max_payload: u32 = std.math.maxInt(u32) - 8 - 1;
+/// Private: the last frame read: its rectangle, whether it was disposed
+/// to the background, and whether it was a key frame.
+pub const Last = struct { rect: Frames.Rect, background: bool, key: bool };
 
-const flag_animation = 0x02;
-const flag_icc = 0x20;
-
-/// Private: what the container says.
-pub const Container = struct {
-    /// The image's bitstream: from its first byte to the end of the file.
-    bitstream: []const u8,
-    /// Where the bitstream starts in the file.
-    at: u64,
-    lossless: bool,
-    alpha: ?[]const u8 = null,
-    icc: ?[]const u8 = null,
-    orientation: Info.Orientation = .normal,
+/// Private: an animation and how far its frames are read.
+pub const Animation = struct {
+    demuxed: demux.Animation,
+    /// The next frame's index.
+    next: u32 = 0,
+    last: ?Last = null,
+    frames: ?Frames = null,
+    /// A frame's pixels, RGBA, before they are composited: the canvas's
+    /// size.
+    scratch: []u8 = &.{},
 };
-
-fn le24(b: []const u8) u32 {
-    return @as(u32, b[0]) | (@as(u32, b[1]) << 8) | (@as(u32, b[2]) << 16);
-}
 
 pub const Decoder = struct {
     gpa: Allocator,
@@ -77,11 +78,17 @@ pub const Decoder = struct {
     file: []u8,
     width: Image.Dimension,
     height: Image.Dimension,
-    container: Container,
+    /// Private: a still image's container, or an animation's frames.
+    still: ?container.Container = null,
+    animation: ?Animation = null,
+    /// Private: a still image read by `nextFrame`.
+    ended: bool = false,
     budget: aegis.bounded.Budget(usize),
+    work: aegis.bounded.Budget(u64),
 
-    /// Read the whole file and its container up to the image's bitstream
-    /// and the bitstream's header. `io` is unused.
+    /// Read the whole file, its container up to the image's bitstream and
+    /// the bitstream's header; or an animation's chunks, each frame's
+    /// header. `io` is unused.
     pub fn init(gpa: Allocator, io: ?Io, reader: *Io.Reader, options: Options) InitError!Decoder {
         _ = io;
         var budget: aegis.bounded.Budget(usize) = .init(options.limits.memory.raw());
@@ -92,8 +99,21 @@ pub const Decoder = struct {
         };
         errdefer gpa.free(file);
         budget.consume(file.len) catch return fail(options, error.TooLarge, .limit, 0);
-        var d: Decoder = .{ .gpa = gpa, .options = options, .file = file, .width = undefined, .height = undefined, .container = undefined, .budget = budget };
-        try d.parse();
+        var d: Decoder = .{ .gpa = gpa, .options = options, .file = file, .width = undefined, .height = undefined, .budget = budget, .work = .init(options.limits.work.raw()) };
+        const o = options;
+        const header = try container.parse(file, 0, o.diagnostic);
+        const size: [2]u32 = switch (header) {
+            .still => |c| .{ c.width, c.height },
+            .animation => |a| .{ a.width, a.height },
+        };
+        d.width = Image.Dimension.init(size[0]) catch return fail(o, error.Invalid, .dimensions, 0);
+        d.height = Image.Dimension.init(size[1]) catch return fail(o, error.Invalid, .dimensions, 0);
+        const pixels = aegis.units.Count(Limits.Pixel, u64).fromRaw(size[0]).mul(size[1]) catch aegis.assert.never("2^24 by 2^24 pixels fit a u64");
+        if (pixels.compare(o.limits.pixels) == .gt) return fail(o, error.TooLarge, .limit, 0);
+        switch (header) {
+            .still => |c| d.still = c,
+            .animation => |a| d.animation = .{ .demuxed = try demux.demux(gpa, &d.budget, file, a, o.limits.frames.raw(), o.diagnostic) },
+        }
         return d;
     }
 
@@ -102,174 +122,181 @@ pub const Decoder = struct {
         return err;
     }
 
-    /// The container as libwebp's ParseHeadersInternal reads it, all of
-    /// the file at hand.
-    fn parse(d: *Decoder) InitError!void {
-        const o = d.options;
-        const file = d.file;
-        if (file.len < 12) return fail(o, error.Truncated, .truncated, file.len);
-        var at: usize = 0;
-        var riff: u32 = 0;
-        if (std.mem.eql(u8, file[0..4], "RIFF")) {
-            if (!std.mem.eql(u8, file[8..12], "WEBP")) return fail(o, error.Invalid, .signature, 8);
-            const size = std.mem.readInt(u32, file[4..8], .little);
-            if (size < 12 or size > max_payload) return fail(o, error.Invalid, .webp_chunk, 4);
-            if (size > file.len - 8) return fail(o, error.Truncated, .truncated, file.len);
-            riff = size;
-            at = 12;
-        }
-        if (file.len - at < 8) return fail(o, error.Truncated, .truncated, file.len);
-        var vp8x = false;
-        var canvas: [2]u32 = .{ 0, 0 };
-        var flags: u32 = 0;
-        if (std.mem.eql(u8, file[at..][0..4], "VP8X")) {
-            if (std.mem.readInt(u32, file[at + 4 ..][0..4], .little) != 10) return fail(o, error.Invalid, .webp_chunk, at);
-            if (file.len - at < 18) return fail(o, error.Truncated, .truncated, file.len);
-            flags = std.mem.readInt(u32, file[at + 8 ..][0..4], .little);
-            canvas = .{ 1 + le24(file[at + 12 ..]), 1 + le24(file[at + 15 ..]) };
-            if (@as(u64, canvas[0]) * canvas[1] >= 1 << 32) return fail(o, error.Invalid, .webp_chunk, at);
-            vp8x = true;
-            at += 18;
-        }
-        if (riff == 0 and vp8x) return fail(o, error.Invalid, .webp_chunk, 0);
-        // libwebp's features: an animation is WebPAnimDecoder's to read.
-        if (vp8x and flags & flag_animation != 0) return fail(o, error.Unsupported, .webp_animation, 0);
-        if (file.len - at < 4) return fail(o, error.Truncated, .truncated, file.len);
-        var c: Container = .{ .bitstream = &.{}, .at = 0, .lossless = false };
-        // The image chunk's size, or the rest of the file for a bare
-        // bitstream (libwebp's compressed_size).
-        var chunk_size: u64 = 0;
-        if ((riff > 0 and vp8x) or (riff == 0 and !vp8x and std.mem.eql(u8, file[at..][0..4], "ALPH"))) {
-            var total: u64 = 4 + 8 + 10;
-            while (true) {
-                if (file.len - at < 8) return fail(o, error.Truncated, .truncated, file.len);
-                const size = std.mem.readInt(u32, file[at + 4 ..][0..4], .little);
-                if (size > max_payload) return fail(o, error.Invalid, .webp_chunk, at);
-                const disk = (8 + @as(u64, size) + 1) & ~@as(u64, 1);
-                total += disk;
-                if (riff > 0 and total > riff) return fail(o, error.Invalid, .webp_chunk, at);
-                const tag = file[at..][0..4];
-                if (std.mem.eql(u8, tag, "VP8 ") or std.mem.eql(u8, tag, "VP8L")) break;
-                if (file.len - at < disk) return fail(o, error.Truncated, .truncated, file.len);
-                const payload = file[at + 8 ..][0..size];
-                if (std.mem.eql(u8, tag, "ALPH")) c.alpha = payload;
-                if (std.mem.eql(u8, tag, "ICCP") and flags & flag_icc != 0) c.icc = payload;
-                if (std.mem.eql(u8, tag, "EXIF")) {
-                    const block = if (std.mem.startsWith(u8, payload, "Exif\x00\x00")) payload[6..] else payload;
-                    c.orientation = exif.orientation(block) orelse .normal;
-                }
-                at += @intCast(disk);
-            }
-        }
-        if (file.len - at < 8) return fail(o, error.Truncated, .truncated, file.len);
-        const tag = file[at..][0..4];
-        if (std.mem.eql(u8, tag, "VP8 ") or std.mem.eql(u8, tag, "VP8L")) {
-            const size = std.mem.readInt(u32, file[at + 4 ..][0..4], .little);
-            if (riff >= 12 and size > riff - 12) return fail(o, error.Invalid, .webp_chunk, at);
-            if (size > file.len - at - 8) return fail(o, error.Truncated, .truncated, file.len);
-            c.lossless = tag[3] == 'L';
-            chunk_size = size;
-            at += 8;
-        } else {
-            // A bare bitstream: VP8L by its signature, else VP8.
-            c.lossless = vp8l.header(file[at..]) != null;
-            chunk_size = file.len - at;
-        }
-        c.bitstream = file[at..];
-        c.at = at;
-        var size: [2]u32 = undefined;
-        if (c.lossless) {
-            if (c.bitstream.len < 5) return fail(o, error.Truncated, .truncated, file.len);
-            const h = vp8l.header(c.bitstream) orelse return fail(o, error.Invalid, .webp_lossless, at);
-            size = .{ h.width, h.height };
-        } else {
-            if (c.bitstream.len < vp8.frame_header_size) return fail(o, error.Truncated, .truncated, file.len);
-            const h = vp8.header(c.bitstream, chunk_size) orelse return fail(o, error.Invalid, .webp_lossy, at);
-            size = .{ h.width, h.height };
-        }
-        if (vp8x and (canvas[0] != size[0] or canvas[1] != size[1])) return fail(o, error.Invalid, .webp_chunk, 0);
-        d.width = Image.Dimension.init(size[0]) catch return fail(o, error.Invalid, .dimensions, at);
-        d.height = Image.Dimension.init(size[1]) catch return fail(o, error.Invalid, .dimensions, at);
-        const pixels = aegis.units.Count(Limits.Pixel, u64).fromRaw(size[0]).mul(size[1]) catch aegis.assert.never("2^14 by 2^14 pixels fit a u64");
-        if (pixels.compare(o.limits.pixels) == .gt) return fail(o, error.TooLarge, .limit, at);
-        d.container = c;
-    }
-
     pub fn info(d: *const Decoder) Info {
+        if (d.animation) |a| return .{
+            .format = .webp,
+            .width = d.width,
+            .height = d.height,
+            .native = .rgba8,
+            .frames = @intCast(a.demuxed.frames.len),
+            .loops = a.demuxed.loops,
+            .orientation = if (a.demuxed.exif) |e| container.orientation(e) else .normal,
+            .icc = a.demuxed.icc,
+        };
+        const c = d.still.?;
         return .{
             .format = .webp,
             .width = d.width,
             .height = d.height,
             .native = .rgba8,
-            .orientation = d.container.orientation,
-            .icc = d.container.icc,
+            .orientation = c.orientation,
+            .icc = c.icc,
         };
+    }
+
+    /// An animation's background colour (ANIM's, RGBA), which libwebp's
+    /// compositing does not use; null for a still image.
+    pub fn background(d: *const Decoder) ?[4]u8 {
+        const a = d.animation orelse return null;
+        const c = a.demuxed.background;
+        return .{ @truncate(c >> 16), @truncate(c >> 8), @truncate(c), @truncate(c >> 24) };
     }
 
     /// The image in `want` (not `indexed8`), allocated from the decoder's
-    /// allocator.
+    /// allocator: an animation's first frame composited.
     pub fn decode(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
         if (want == .indexed8) return error.Unsupported;
-        if (!d.container.lossless) return d.lossy(want);
-        const w = d.width.raw();
-        const h = d.height.raw();
-        var l = vp8l.Decoder.init(d.gpa, &d.budget, d.container.bitstream, d.container.at);
-        defer l.deinit();
-        const argb = l.image(w, h) catch |err| return switch (err) {
-            error.Invalid => fail(d.options, error.Invalid, .webp_lossless, l.offset()),
-            error.TooLarge => fail(d.options, error.TooLarge, .limit, l.offset()),
-            error.OutOfMemory => error.OutOfMemory,
-        };
         var image = try d.output(want);
-        for (0..h) |y| {
-            const row = image.mutable().row(y);
-            for (0..w) |x| {
-                const p = argb[y * w + x];
-                const c: [4]u8 = .{ @truncate(p >> 16), @truncate(p >> 8), @truncate(p), @truncate(p >> 24) };
-                pixel.put(want, row, x, .{ pixel.widen(c[0]), pixel.widen(c[1]), pixel.widen(c[2]), pixel.widen(c[3]) });
-            }
-        }
+        errdefer image.deinit();
+        _ = try d.nextFrame(image.mutable());
         return image;
     }
 
-    /// The image of a VP8 bitstream: decoded, upsampled to RGB as dwebp
-    /// does, its ALPH chunk's alpha (or opaque) beside.
-    fn lossy(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
+    /// The next frame composited onto the canvas, written into `out` (the
+    /// canvas's size, any format but `indexed8`); its rectangle, delay (in
+    /// milliseconds), disposal and blending. A still image is one frame.
+    /// Null after the last. Each frame's canvas is charged to
+    /// `Limits.work` before it is decoded; its decoding has what remains
+    /// of `Limits.memory`, given back after.
+    pub fn nextFrame(d: *Decoder, out: Image.Mutable) ReadError!?Frames.Frame {
+        aegis.assert.invariant(out.width.eql(d.width) and out.height.eql(d.height), "a frame is written at the canvas's size");
+        if (out.format == .indexed8) return error.Unsupported;
+        if (d.still) |c| return d.stillFrame(c, out);
         const w = d.width.raw();
         const h = d.height.raw();
-        var v = vp8.Decoder.init(d.gpa, &d.budget, d.container.bitstream);
+        const a = &d.animation.?;
+        if (a.next == a.demuxed.frames.len) return null;
+        const f = a.demuxed.frames[a.next];
+        const canvas_pixels = aegis.units.Count(Limits.Pixel, u64).fromRaw(w).mul(h) catch aegis.assert.never("2^24 by 2^24 pixels fit a u64");
+        d.work.consume(canvas_pixels.raw()) catch return fail(d.options, error.TooLarge, .limit, f.start);
+        if (a.frames == null) {
+            try d.charge(Frames.memory(d.width, d.height).raw());
+            try d.charge(@as(usize, w) * h * 4);
+            a.scratch = try d.gpa.alloc(u8, @as(usize, w) * h * 4);
+            a.frames = Frames.init(d.gpa, d.width, d.height) catch |err| {
+                d.gpa.free(a.scratch);
+                a.scratch = &.{};
+                return err;
+            };
+        }
+        // The frame's chunks as WebPDecode reads them.
+        const header = container.parse(d.file[f.start..f.end], f.start, d.options.diagnostic) catch return error.Invalid;
+        const c = header.still;
+        aegis.assert.invariant(c.width == f.width and c.height == f.height, "the demuxer took the frame's size from its image chunk");
+        const rgba = a.scratch[0 .. @as(usize, f.width) * f.height * 4];
+        var budget: aegis.bounded.Budget(usize) = .init(d.budget.remaining());
+        try d.decodeInto(&budget, c, rgba);
+
+        const rect: Frames.Rect = .{ .x = f.x, .y = f.y, .width = f.width, .height = f.height };
+        const first = a.next == 0;
+        const key = first or ((!f.has_alpha or !f.blend) and f.width == w and f.height == h) or
+            if (a.last) |l| l.background and ((l.rect.width == w and l.rect.height == h) or l.key) else false;
+        const frames = &a.frames.?;
+        frames.begin(rect, if (f.dispose_background) .background else .none, first);
+        if (key) frames.clear();
+        for (0..f.height) |i| {
+            const y = f.y + i;
+            const row = frames.row(y);
+            for (0..f.width) |j| {
+                const x = f.x + j;
+                const src = rgba[4 * (i * f.width + j) ..][0..4].*;
+                const v = if (f.blend and !key and src[3] != 255 and !cleared(a.last, x, y)) blend(src, narrow(pixel.get(.rgba16, row, x, null))) else src;
+                pixel.put(.rgba16, row, x, .{ pixel.widen(v[0]), pixel.widen(v[1]), pixel.widen(v[2]), pixel.widen(v[3]) });
+            }
+        }
+        a.last = .{ .rect = rect, .background = f.dispose_background, .key = key };
+        a.next += 1;
+        const canvas = frames.view();
+        for (0..h) |y| {
+            const src = canvas.row(y);
+            const dst = out.row(y);
+            if (out.format == .rgba16) @memcpy(dst, src) else for (0..w) |x| {
+                pixel.put(out.format, dst, x, pixel.get(.rgba16, src, x, null));
+            }
+        }
+        return .{
+            .rect = rect,
+            .delay = .{ .num = f.duration, .den = 1000 },
+            .dispose = if (f.dispose_background) .background else .none,
+            .blend = if (f.blend) .over else .source,
+        };
+    }
+
+    /// A still image as the one frame it is.
+    fn stillFrame(d: *Decoder, c: container.Container, out: Image.Mutable) ReadError!?Frames.Frame {
+        if (d.ended) return null;
+        d.ended = true;
+        const w = c.width;
+        const h = c.height;
+        const n = @as(usize, w) * h * 4;
+        try d.charge(n);
+        const rgba = try d.gpa.alloc(u8, n);
+        defer d.gpa.free(rgba);
+        var budget: aegis.bounded.Budget(usize) = .init(d.budget.remaining());
+        try d.decodeInto(&budget, c, rgba);
+        for (0..h) |y| {
+            const row = out.row(y);
+            for (0..w) |x| {
+                const p = rgba[4 * (y * w + x) ..][0..4];
+                pixel.put(out.format, row, x, .{ pixel.widen(p[0]), pixel.widen(p[1]), pixel.widen(p[2]), pixel.widen(p[3]) });
+            }
+        }
+        return .{ .rect = .{ .x = 0, .y = 0, .width = w, .height = h }, .delay = .{ .num = 0, .den = 1000 }, .dispose = .none, .blend = .source };
+    }
+
+    /// The pixels of a still image's container `c`, RGBA, into `rgba`:
+    /// lossless, or lossy upsampled to RGB as dwebp does with its ALPH
+    /// chunk's alpha (or opaque). Its decoders charge `budget`.
+    fn decodeInto(d: *Decoder, budget: *aegis.bounded.Budget(usize), c: container.Container, rgba: []u8) ReadError!void {
+        const w = c.width;
+        const h = c.height;
+        if (c.lossless) {
+            var l = vp8l.Decoder.init(d.gpa, budget, c.bitstream, c.at);
+            defer l.deinit();
+            const argb = l.image(w, h) catch |err| return switch (err) {
+                error.Invalid => fail(d.options, error.Invalid, .webp_lossless, l.offset()),
+                error.TooLarge => fail(d.options, error.TooLarge, .limit, l.offset()),
+                error.OutOfMemory => error.OutOfMemory,
+            };
+            for (argb, 0..) |p, i| rgba[4 * i ..][0..4].* = .{ @truncate(p >> 16), @truncate(p >> 8), @truncate(p), @truncate(p >> 24) };
+            return;
+        }
+        var v = vp8.Decoder.init(d.gpa, budget, c.bitstream);
         defer v.deinit();
         const frame = v.decode() catch |err| return switch (err) {
-            error.Invalid => fail(d.options, error.Invalid, if (v.failure == .truncated) .truncated else .webp_lossy, d.container.at + v.failed_at),
-            error.TooLarge => fail(d.options, error.TooLarge, .limit, d.container.at),
+            error.Invalid => fail(d.options, error.Invalid, if (v.failure == .truncated) .truncated else .webp_lossy, c.at + v.failed_at),
+            error.TooLarge => fail(d.options, error.TooLarge, .limit, c.at),
             error.OutOfMemory => error.OutOfMemory,
         };
-        const n = @as(usize, w) * h;
-        d.budget.consume(n * 5) catch return fail(d.options, error.TooLarge, .limit, 0);
-        const rgba = try d.gpa.alloc(u8, n * 4);
-        defer d.gpa.free(rgba);
         vp8.rgba(&frame, rgba);
-        if (d.container.alpha) |chunk| {
+        if (c.alpha) |chunk| {
+            const n = @as(usize, w) * h;
+            budget.consume(n) catch return fail(d.options, error.TooLarge, .limit, c.at);
             const plane = try d.gpa.alloc(u8, n);
             defer d.gpa.free(plane);
             const base = @intFromPtr(chunk.ptr) - @intFromPtr(d.file.ptr);
             var failed_at: u64 = base;
-            alpha.decode(d.gpa, &d.budget, chunk, base, w, h, plane, &failed_at) catch |err| return switch (err) {
+            alpha.decode(d.gpa, budget, chunk, base, w, h, plane, &failed_at) catch |err| return switch (err) {
                 error.Invalid => fail(d.options, error.Invalid, .webp_alpha, failed_at),
                 error.TooLarge => fail(d.options, error.TooLarge, .limit, base),
                 error.OutOfMemory => error.OutOfMemory,
             };
-            for (plane, 0..) |a, i| rgba[4 * i + 3] = a;
+            for (plane, 0..) |p, i| rgba[4 * i + 3] = p;
         }
-        var image = try d.output(want);
-        for (0..h) |y| {
-            const row = image.mutable().row(y);
-            for (0..w) |x| {
-                const c = rgba[4 * (y * w + x) ..][0..4];
-                pixel.put(want, row, x, .{ pixel.widen(c[0]), pixel.widen(c[1]), pixel.widen(c[2]), pixel.widen(c[3]) });
-            }
-        }
-        return image;
+    }
+
+    fn charge(d: *Decoder, bytes: usize) error{TooLarge}!void {
+        d.budget.consume(bytes) catch return fail(d.options, error.TooLarge, .limit, 0);
     }
 
     /// An image of the decoder's size in `want`, its pixels charged to the
@@ -279,13 +306,54 @@ pub const Decoder = struct {
         const h = d.height.raw();
         const stride = want.rowBytes(w);
         const size = stride.mul(h) catch return fail(d.options, error.TooLarge, .limit, 0);
-        d.budget.consume(size.raw()) catch return fail(d.options, error.TooLarge, .limit, 0);
+        try d.charge(size.raw());
         const px = try d.gpa.alloc(u8, size.raw());
         return .{ .gpa = d.gpa, .width = d.width, .height = d.height, .format = want, .stride = stride, .pixels = px };
     }
 
     pub fn deinit(d: *Decoder) void {
+        if (d.animation) |*a| {
+            a.demuxed.deinit(d.gpa);
+            if (a.frames) |*f| f.deinit();
+            d.gpa.free(a.scratch);
+        }
         d.gpa.free(d.file);
         d.* = undefined;
     }
 };
+
+/// Whether the last frame's disposal cleared the canvas at (`x`, `y`):
+/// libwebp blends nowhere there (FindBlendRangeAtRow).
+fn cleared(last: ?Last, x: usize, y: usize) bool {
+    const l = last orelse return false;
+    const r = l.rect;
+    return l.background and x >= r.x and x < r.x + r.width and y >= r.y and y < r.y + r.height;
+}
+
+fn narrow(c: pixel.Rgba16) [4]u8 {
+    return .{ pixel.narrow(c[0]), pixel.narrow(c[1]), pixel.narrow(c[2]), pixel.narrow(c[3]) };
+}
+
+/// libwebp's BlendPixelNonPremult: `src` over `dst`, alpha straight, the
+/// destination's weight `(dst_a * (256 - src_a)) >> 8` and each channel
+/// scaled by `2^24 / alpha`, truncated.
+fn blend(src: [4]u8, dst: [4]u8) [4]u8 {
+    const sa: u32 = src[3];
+    if (sa == 0) return dst;
+    const dfa: u32 = (@as(u32, dst[3]) * (256 - sa)) >> 8;
+    const ba = sa + dfa;
+    const scale: u64 = (1 << 24) / ba;
+    var out: [4]u8 = undefined;
+    for (0..3) |i| out[i] = @intCast(((@as(u64, src[i]) * sa + @as(u64, dst[i]) * dfa) * scale) >> 24);
+    out[3] = @intCast(ba);
+    return out;
+}
+
+test "blend: libwebp's arithmetic, truncating" {
+    // Half over opaque: the destination weighs (255 * 128) >> 8 = 127.
+    try std.testing.expectEqual([4]u8{ 100, 0, 0, 255 }, blend(.{ 200, 0, 0, 128 }, .{ 0, 0, 0, 255 }));
+    // Over clear: each colour scaled by 2^24 / 3 and back, a little lost.
+    try std.testing.expectEqual([4]u8{ 199, 9, 0, 3 }, blend(.{ 200, 10, 0, 3 }, .{ 0, 0, 0, 0 }));
+    // A clear source leaves the destination.
+    try std.testing.expectEqual([4]u8{ 1, 2, 3, 4 }, blend(.{ 9, 9, 9, 0 }, .{ 1, 2, 3, 4 }));
+}

@@ -34,7 +34,7 @@ All notable changes to aperture are documented here. The format follows
   `Unsupported` by name; where libjpeg-turbo recovers from corrupt data with a warning,
   aperture refuses. Coefficients charged to `Limits.memory`, progressive scans to
   `Limits.scans`.
-- WebP decoding (`webp.Decoder`, `decode`), stills so far: the RIFF container as libwebp
+- WebP decoding (`webp.Decoder`, `decode`): the RIFF container as libwebp
   reads it (VP8X and the chunks before the image, a bare VP8 or VP8L bitstream, the ICC
   profile and EXIF orientation in `Info`), to libwebp 1.6.0's pixels bit for bit as dwebp
   gives them, and its refusals. Lossless (VP8L): the predictor, cross-colour,
@@ -46,9 +46,19 @@ All notable changes to aperture are documented here. The format follows
   upsampling to RGB; refused where libwebp's partition readers run out, as libwebp reads on
   a 64-bit machine. Its ALPH chunk's alpha: raw or VP8L-coded (a stream libwebp decodes a byte
   a pixel may end in its last pixel, read as libwebp reads past its data), unfiltered
-  horizontally, vertically or by gradient.
-  Animations are `Unsupported` by name until their decoder lands. The file is read whole,
-  charged to `Limits.memory`.
+  horizontally, vertically or by gradient. Animations (`webp.Decoder.nextFrame`, the loop
+  count and frame count in `Info`, ANIM's colour from `background`): the chunks as libwebp's
+  demuxer reads them (ANMF frames, each with its ALPH and image chunks, its size its
+  bitstream's; refused: an image outside ANMF, ANMF before ANIM, a frame without its image,
+  with ALPH after it or before VP8L, running past its ANMF or past the canvas, bytes left in
+  the RIFF chunk, VP8X flags libwebp does not define, no frame), each frame composited onto
+  the canvas (`Frames`) as WebPAnimDecoder composites it: its key frames from a clear canvas,
+  its blending in 8 bits with its arithmetic where the last frame's disposal did not clear
+  the canvas; a frame whose data libwebp refuses refused at that frame. The frame count is
+  bounded by `Limits.frames`, each frame charged to `Limits.work`, and each frame decoded
+  within what remains of `Limits.memory`. The file is read whole, charged to `Limits.memory`.
+- `Frames.Delay`'s numerator is 32 bits (a WebP frame's delay is up to 2^24 - 1
+  milliseconds); `Frames.clear` clears the whole canvas.
 - PNG encoding (`png.encode`): each row's filter chosen by the least sum of absolute
   differences, the smallest lossless colour type by default (no alpha, gray at 1 to 16 bits,
   a palette for at most 256 colours, 8 bits for widened 16-bit samples), warp's zlib in three

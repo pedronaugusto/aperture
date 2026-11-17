@@ -96,6 +96,11 @@ pub const Reason = enum {
     /// pre-processing past 1, reserved bits set, raw alpha shorter than the
     /// image, or VP8L-coded alpha refused as `webp_lossless` would be.
     webp_alpha,
-    /// Unsupported, for now: animation.
+    /// An animation's chunks libwebp's demuxer refuses: an image outside an
+    /// ANMF chunk, an ANMF before ANIM or shorter than its header, a frame
+    /// without an image, with its ALPH chunk after it or before VP8L, or
+    /// whose chunks run past its ANMF chunk; a frame past the canvas, a
+    /// chunk past the RIFF chunk, VP8X flags libwebp does not define, or
+    /// no frame.
     webp_animation,
 };

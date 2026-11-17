@@ -1,5 +1,5 @@
-//! The canvas an animation's frames are composited onto (APNG now, GIF and
-//! WebP after): 16-bit RGBA, alpha straight, transparent black at the
+//! The canvas an animation's frames are composited onto (APNG, GIF and
+//! WebP): 16-bit RGBA, alpha straight, transparent black at the
 //! start. Each frame names the rectangle it covers, how it is blended there
 //! (replacing the canvas, or over it), and how its rectangle is disposed of
 //! before the next frame (left, cleared, or restored to what it was before
@@ -34,8 +34,8 @@ pub const Blend = enum(u8) {
 pub const Rect = struct { x: u32, y: u32, width: u32, height: u32 };
 
 /// A frame's delay: `num / den` seconds (APNG's `den` of 0 read as 100; a
-/// GIF's in hundredths).
-pub const Delay = struct { num: u16, den: u16 };
+/// GIF's in hundredths; a WebP's in thousandths, up to 2^24 - 1 of them).
+pub const Delay = struct { num: u32, den: u16 };
 
 /// An animation frame: where it lies on the canvas, how long it shows, how
 /// it is blended and disposed of.
@@ -130,6 +130,12 @@ pub fn begin(f: *Frames, rect: Rect, dispose: Dispose, first: bool) void {
         @memcpy(f.saved[i * n ..][0..n], f.row(rect.y + i)[rect.x * 8 ..][0..n]);
     };
     f.last = .{ .rect = rect, .dispose = d };
+}
+
+/// The whole canvas cleared to transparent black, after `begin`: a WebP
+/// key frame's start.
+pub fn clear(f: *Frames) void {
+    @memset(f.canvas, 0);
 }
 
 /// Composite a frame: `begin`, then `frame` (an `rgba16` image of `rect`'s
