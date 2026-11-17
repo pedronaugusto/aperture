@@ -92,8 +92,24 @@ pub fn quantize(gpa: Allocator, src: Image.View, options: Options) Error!Image {
     const pixels = try gpa.alloc(u8, size.raw());
     errdefer gpa.free(pixels);
     var image: Image = .{ .gpa = gpa, .width = src.width, .height = src.height, .format = .indexed8, .stride = stride, .pixels = pixels, .palette = palette };
-    if (options.dither) try diffuse(gpa, src, image.mutable(), centres) else try map(gpa, src, image.mutable(), centres);
+    if (entries.len <= want) {
+        // Each pixel its own colour's entry: no search, which would take
+        // colours equal premultiplied (all the clear ones) as one.
+        own(src, image.mutable(), &counts);
+    } else if (options.dither) try diffuse(gpa, src, image.mutable(), centres) else try map(gpa, src, image.mutable(), centres);
     return image;
+}
+
+/// Each pixel of `src` as the index of its colour among `counts`'s keys,
+/// the palette's entries in the same order.
+fn own(src: Image.View, dst: Image.Mutable, counts: *const std.array_hash_map.Auto(u32, u32)) void {
+    for (0..src.height.raw()) |y| {
+        const row = src.row(y);
+        for (dst.row(y), 0..) |*o, x| {
+            const key = std.mem.readInt(u32, &eightBit(pixel.get(src.format, row, x, src.palette)), .little);
+            o.* = @intCast(counts.getIndex(key) orelse aegis.assert.never("every pixel's colour is counted"));
+        }
+    }
 }
 
 /// The most distinct colours the palette is cut from: past it, colours

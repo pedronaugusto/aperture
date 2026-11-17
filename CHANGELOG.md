@@ -46,7 +46,8 @@ All notable changes to aperture are documented here. The format follows
   and Lanczos-3 filters, in premultiplied alpha, in linear light on request, edges clamped.
 - Palette quantization (`quantize`): at most 2 to 256 colours, cut from the histogram by
   median cut and refined by k-means, distances taken premultiplied; Floyd-Steinberg
-  dithering on request.
+  dithering on request. An image of no more colours than asked for keeps each exactly, every
+  pixel its own colour's entry (clear colours that differ only in what they hide included).
 - Conversion options (`convert`): sRGB decoded to linear light or encoded from it, and
   compositing onto an opaque background; `orient` applies an EXIF orientation, which PNG's
   eXIf chunk gives `Info.orientation`.

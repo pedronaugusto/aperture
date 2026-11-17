@@ -193,7 +193,7 @@ fn flatStaysFlat(_: void, case: *Case) !void {
     const w = gen.intRange(s, u32, 1, 16);
     const h = gen.intRange(s, u32, 1, 16);
     var colour: [4]u8 = undefined;
-    _ = gen.bytesInto(s, &colour);
+    s.bytes(&colour);
     colour[3] = gen.intRange(s, u8, 1, 255);
     const px = try case.gpa.alloc(u8, @as(usize, w) * h * 4);
     for (0..@as(usize, w) * h) |i| px[i * 4 ..][0..4].* = colour;
@@ -215,7 +215,7 @@ fn noBleed(_: void, case: *Case) !void {
     const other = try case.gpa.dupe(u8, src.pixels);
     for (0..other.len / 4) |i| {
         if (gen.boolean(s)) other[i * 4 + 3] = 0;
-        if (other[i * 4 + 3] == 0) _ = gen.bytesInto(s, other[i * 4 ..][0..3]);
+        if (other[i * 4 + 3] == 0) s.bytes(other[i * 4 ..][0..3]);
     }
     for (0..other.len / 4) |i| if (other[i * 4 + 3] == 0) {
         src.pixels[i * 4 + 3] = 0;
@@ -296,7 +296,7 @@ fn quantizes(_: void, case: *Case) !void {
     if (few) {
         const k = gen.intRange(s, usize, 1, colours);
         const set = try case.gpa.alloc([4]u8, k);
-        for (set) |*c| _ = gen.bytesInto(s, c);
+        for (set) |*c| s.bytes(c);
         for (0..src.pixels.len / 4) |i| src.pixels[i * 4 ..][0..4].* = set[gen.intRange(s, usize, 0, k - 1)];
     }
     var q = try aperture.quantize(testing.allocator, src.view(), .{ .colours = try .init(colours), .dither = dither });
@@ -384,7 +384,7 @@ fn apngOf(case: *Case, frames: []const Drawn, w: u32, h: u32, default_is_frame: 
         if (i == 0 and !default_is_frame) {
             // A default image that is not a frame, drawn by the case too.
             const hidden = try case.gpa.alloc(u8, @as(usize, w) * h * 4);
-            _ = gen.bytesInto(s, hidden);
+            s.bytes(hidden);
             try chunk(&file, "IDAT", try zlibOf(case, hidden, w, h));
         }
         try chunk(&file, "fcTL", &fctl);
@@ -416,7 +416,7 @@ fn animation(_: void, case: *Case) !void {
         const x = if (i == 0 and default_is_frame) 0 else gen.intRange(s, u32, 0, w - fw);
         const y = if (i == 0 and default_is_frame) 0 else gen.intRange(s, u32, 0, h - fh);
         const px = try case.gpa.alloc(u8, @as(usize, fw) * fh * 4);
-        _ = gen.bytesInto(s, px);
+        s.bytes(px);
         // Alphas clear, opaque and between.
         for (0..px.len / 4) |p| px[p * 4 + 3] = gen.oneOf(s, u8, &.{ 0, 255, 255, px[p * 4 + 3] });
         f.* = .{ .rect = .{ .x = x, .y = y, .width = fw, .height = fh }, .dispose = gen.enumValue(s, aperture.Frames.Dispose), .blend = gen.enumValue(s, aperture.Frames.Blend), .delay = .{ gen.int(s, u16), gen.intRange(s, u16, 1, 1000) }, .px = px };
