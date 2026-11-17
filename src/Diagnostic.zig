@@ -77,4 +77,19 @@ pub const Reason = enum {
     /// Unsupported: a component count other than 1, 3 or 4, or a sampling
     /// ratio that is not a whole number.
     jpeg_components,
+
+    // WebP.
+    /// A RIFF or chunk header that breaks the container's rules: the wrong
+    /// form type, a size past the RIFF's or the file's, a VP8X of the wrong
+    /// size or an image of 2^32 pixels or more, a VP8X without RIFF, or a
+    /// canvas that is not the image's size.
+    webp_chunk,
+    /// A VP8L bitstream libwebp refuses: the wrong signature or version, a
+    /// transform twice, a prefix code over-full or incomplete, a copy from
+    /// before the image or past its end, or data read past its end.
+    webp_lossless,
+    /// Unsupported, for now: lossy (VP8) coding.
+    webp_lossy,
+    /// Unsupported, for now: animation.
+    webp_animation,
 };

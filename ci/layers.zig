@@ -15,6 +15,9 @@ pub const layers: []const gantry.rules.Layer = &.{
     .{ .name = "jpeg scans", .patterns = &.{"src/jpeg/progressive.zig"} },
     .{ .name = "jpeg codecs", .patterns = &.{"src/jpeg/decode.zig"} },
     .{ .name = "jpeg", .patterns = &.{"src/jpeg.zig"} },
+    .{ .name = "webp parts", .patterns = &.{"src/webp/vp8l.zig"} },
+    .{ .name = "webp codecs", .patterns = &.{"src/webp/decode.zig"} },
+    .{ .name = "webp", .patterns = &.{"src/webp.zig"} },
     .{ .name = "public", .patterns = &.{"src/aperture.zig"} },
 };
 
@@ -26,7 +29,7 @@ const package_references = [_]gantry.rules.ReferenceRule{
     .{
         .name = "named dependencies",
         .unresolved_only = true,
-        .except_targets = &.{ "std", "aegis", "warp", "builtin", "shakedown", "pngsuite.corpus", "gif.corpus", "jpeg.corpus", "animated-red-blue.apng", "animated-red-blue.000000.nie", "animated-red-blue.000001.nie", "animated-red-blue.000002.nie", "animated-red-blue.000003.nie", "apng-skip-idat.png", "muybridge.apng" },
+        .except_targets = &.{ "std", "aegis", "warp", "builtin", "shakedown", "pngsuite.corpus", "gif.corpus", "jpeg.corpus", "webp.corpus", "animated-red-blue.apng", "animated-red-blue.000000.nie", "animated-red-blue.000001.nie", "animated-red-blue.000002.nie", "animated-red-blue.000003.nie", "apng-skip-idat.png", "muybridge.apng" },
     },
     .{ .name = "source siblings", .suffix = ".zig", .relative = true, .except_targets = &.{"src/**"} },
 };
@@ -62,5 +65,8 @@ pub const required = [_][]const u8{
     "src/jpeg/progressive.zig",
     "src/jpeg/decode.zig",
     "src/jpeg.zig",
+    "src/webp/vp8l.zig",
+    "src/webp/decode.zig",
+    "src/webp.zig",
     "src/aperture.zig",
 };

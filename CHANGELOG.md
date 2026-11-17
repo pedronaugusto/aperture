@@ -34,6 +34,14 @@ All notable changes to aperture are documented here. The format follows
   `Unsupported` by name; where libjpeg-turbo recovers from corrupt data with a warning,
   aperture refuses. Coefficients charged to `Limits.memory`, progressive scans to
   `Limits.scans`.
+- WebP decoding (`webp.Decoder`, `decode`), lossless (VP8L) so far: the RIFF container as
+  libwebp reads it (VP8X and the chunks before the image, a bare VP8L bitstream, the ICC
+  profile and EXIF orientation in `Info`); the predictor, cross-colour, subtract-green and
+  colour-indexing transforms, the colour cache, meta prefix codes and LZ77 copies, to
+  libwebp 1.6.0's pixels bit for bit, and its refusals: a transform twice, a prefix code
+  over-full or incomplete, a copy outside the image, data read past its end. Lossy (VP8)
+  images and animations are `Unsupported` by name until their decoders land. The file is
+  read whole, charged to `Limits.memory`.
 - PNG encoding (`png.encode`): each row's filter chosen by the least sum of absolute
   differences, the smallest lossless colour type by default (no alpha, gray at 1 to 16 bits,
   a palette for at most 256 colours, 8 bits for widened 16-bit samples), warp's zlib in three
