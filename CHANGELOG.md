@@ -87,3 +87,8 @@ All notable changes to aperture are documented here. The format follows
   eXIf chunk gives `Info.orientation`.
 - Pixel formats (`PixelFormat`), images owned and borrowed (`Image`, `View`, `Mutable`),
   `Limits`, `Info` and `detect`.
+
+### Changed
+
+- Pins warp 46a58d2, where it pinned 0dcd202: warp main, the one warp a program on aperture
+  and visor links (aegis f52eabe for both). Nothing aperture calls changed.
