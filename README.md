@@ -4,7 +4,7 @@ aperture: image codecs for Zig: PNG (with APNG), JPEG, GIF and WebP decoding, PN
 encoding, pixel conversion, scaling and palette quantization. Every decoder streams by rows
 from a std.Io.Reader, reads the header before any pixel, and holds every allocation and every
 unit of work to limits charged before they are spent, so an untrusted image can't buy unbounded
-memory or time. Built on warp (zlib and LZW), ladar (CPU features) and aegis.
+memory or time. Built on warp (zlib and LZW) and aegis.
 
 Status: in development, before 0.1.0. PNG is built both ways (every colour type and bit
 depth, Adam7, palette and tRNS, 16-bit samples, the ICC profile handed on) with pixel

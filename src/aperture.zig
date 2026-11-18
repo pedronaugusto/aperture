@@ -1,8 +1,8 @@
 //! aperture: image codecs. Decoders stream from a `std.Io.Reader`, read the
 //! header before any pixel, and charge every allocation and every unit of
-//! work to `Limits` before spending it. PNG both ways; GIF, JPEG and
-//! WebP (lossless, for now) decoding; each a namespace lazy analysis
-//! drops when unused.
+//! work to `Limits` before spending it. PNG both ways, JPEG both ways,
+//! GIF and WebP decoding; each a namespace lazy analysis drops when
+//! unused.
 
 const std = @import("std");
 const Io = std.Io;
@@ -64,8 +64,7 @@ pub const DecodeOptions = struct {
 pub const DecodeError = png.InitError || png.ReadError || gif.InitError || gif.ReadError || jpeg.InitError || jpeg.ReadError || webp.InitError || webp.ReadError;
 
 /// One-shot: the format from the first bytes, its header, then the whole
-/// image converted to `want`. A format aperture does not decode yet is
-/// `Unsupported`.
+/// image converted to `want`.
 pub fn decode(gpa: Allocator, io: Io, reader: *Io.Reader, want: PixelFormat, options: DecodeOptions) DecodeError!Image {
     _ = io;
     const prefix = reader.peek(12) catch |err| switch (err) {
