@@ -54,7 +54,13 @@ pub const ReadError = error{
     OutOfMemory,
     /// `indexed8` asked for.
     Unsupported,
+    /// The call's `io` was canceled: a frame checks once per band of its rows
+    /// (of macroblocks, of pixels), and stops there.
+    Canceled,
 };
+
+/// How often a frame's compositing checks its `io` for a cancel.
+const band_rows = 64;
 
 /// Private: the last frame read: its rectangle, whether it was disposed
 /// to the background, and whether it was a key frame.
@@ -88,9 +94,8 @@ pub const Decoder = struct {
 
     /// Read the whole file, its container up to the image's bitstream and
     /// the bitstream's header; or an animation's chunks, each frame's
-    /// header. `io` is unused.
-    pub fn init(gpa: Allocator, io: ?Io, reader: *Io.Reader, options: Options) InitError!Decoder {
-        _ = io;
+    /// header.
+    pub fn init(gpa: Allocator, reader: *Io.Reader, options: Options) InitError!Decoder {
         var budget: aegis.bounded.Budget(usize) = .init(options.limits.memory.raw());
         const file = reader.allocRemaining(gpa, .limited(options.limits.memory.raw())) catch |err| return switch (err) {
             error.StreamTooLong => fail(options, error.TooLarge, .limit, 0),
@@ -154,11 +159,11 @@ pub const Decoder = struct {
 
     /// The image in `want` (not `indexed8`), allocated from the decoder's
     /// allocator: an animation's first frame composited.
-    pub fn decode(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
+    pub fn decode(d: *Decoder, io: Io, want: pixel.PixelFormat) ReadError!Image {
         if (want == .indexed8) return error.Unsupported;
         var image = try d.output(want);
         errdefer image.deinit();
-        _ = try d.nextFrame(image.mutable());
+        _ = try d.nextFrame(io, image.mutable());
         return image;
     }
 
@@ -168,10 +173,10 @@ pub const Decoder = struct {
     /// Null after the last. Each frame's canvas is charged to
     /// `Limits.work` before it is decoded; its decoding has what remains
     /// of `Limits.memory`, given back after.
-    pub fn nextFrame(d: *Decoder, out: Image.Mutable) ReadError!?Frames.Frame {
+    pub fn nextFrame(d: *Decoder, io: Io, out: Image.Mutable) ReadError!?Frames.Frame {
         aegis.assert.invariant(out.width.eql(d.width) and out.height.eql(d.height), "a frame is written at the canvas's size");
         if (out.format == .indexed8) return error.Unsupported;
-        if (d.still) |c| return d.stillFrame(c, out);
+        if (d.still) |c| return d.stillFrame(io, c, out);
         const w = d.width.raw();
         const h = d.height.raw();
         const a = &d.animation.?;
@@ -195,7 +200,7 @@ pub const Decoder = struct {
         aegis.assert.invariant(c.width == f.width and c.height == f.height, "the demuxer took the frame's size from its image chunk");
         const rgba = a.scratch[0 .. @as(usize, f.width) * f.height * 4];
         var budget: aegis.bounded.Budget(usize) = .init(d.budget.remaining());
-        try d.decodeInto(&budget, c, rgba);
+        try d.decodeInto(io, &budget, c, rgba);
 
         const rect: Frames.Rect = .{ .x = f.x, .y = f.y, .width = f.width, .height = f.height };
         const first = a.next == 0;
@@ -205,6 +210,7 @@ pub const Decoder = struct {
         frames.begin(rect, if (f.dispose_background) .background else .none, first);
         if (key) frames.clear();
         for (0..f.height) |i| {
+            if (i % band_rows == 0) try io.checkCancel();
             const y = f.y + i;
             const row = frames.row(y);
             for (0..f.width) |j| {
@@ -218,6 +224,7 @@ pub const Decoder = struct {
         a.next += 1;
         const canvas = frames.view();
         for (0..h) |y| {
+            if (y % band_rows == 0) try io.checkCancel();
             const src = canvas.row(y);
             const dst = out.row(y);
             if (out.format == .rgba16) @memcpy(dst, src) else for (0..w) |x| {
@@ -233,7 +240,7 @@ pub const Decoder = struct {
     }
 
     /// A still image as the one frame it is.
-    fn stillFrame(d: *Decoder, c: container.Container, out: Image.Mutable) ReadError!?Frames.Frame {
+    fn stillFrame(d: *Decoder, io: Io, c: container.Container, out: Image.Mutable) ReadError!?Frames.Frame {
         if (d.ended) return null;
         d.ended = true;
         const w = c.width;
@@ -243,8 +250,9 @@ pub const Decoder = struct {
         const rgba = try d.gpa.alloc(u8, n);
         defer d.gpa.free(rgba);
         var budget: aegis.bounded.Budget(usize) = .init(d.budget.remaining());
-        try d.decodeInto(&budget, c, rgba);
+        try d.decodeInto(io, &budget, c, rgba);
         for (0..h) |y| {
+            if (y % band_rows == 0) try io.checkCancel();
             const row = out.row(y);
             for (0..w) |x| {
                 const p = rgba[4 * (y * w + x) ..][0..4];
@@ -257,26 +265,28 @@ pub const Decoder = struct {
     /// The pixels of a still image's container `c`, RGBA, into `rgba`:
     /// lossless, or lossy upsampled to RGB as dwebp does with its ALPH
     /// chunk's alpha (or opaque). Its decoders charge `budget`.
-    fn decodeInto(d: *Decoder, budget: *aegis.bounded.Budget(usize), c: container.Container, rgba: []u8) ReadError!void {
+    fn decodeInto(d: *Decoder, io: Io, budget: *aegis.bounded.Budget(usize), c: container.Container, rgba: []u8) ReadError!void {
         const w = c.width;
         const h = c.height;
         if (c.lossless) {
-            var l = vp8l.Decoder.init(d.gpa, budget, c.bitstream, c.at);
+            var l = vp8l.Decoder.init(d.gpa, io, budget, c.bitstream, c.at);
             defer l.deinit();
             const argb = l.image(w, h) catch |err| return switch (err) {
                 error.Invalid => fail(d.options, error.Invalid, .webp_lossless, l.offset()),
                 error.TooLarge => fail(d.options, error.TooLarge, .limit, l.offset()),
                 error.OutOfMemory => error.OutOfMemory,
+                error.Canceled => error.Canceled,
             };
             for (argb, 0..) |p, i| rgba[4 * i ..][0..4].* = .{ @truncate(p >> 16), @truncate(p >> 8), @truncate(p), @truncate(p >> 24) };
             return;
         }
-        var v = vp8.Decoder.init(d.gpa, budget, c.bitstream);
+        var v = vp8.Decoder.init(d.gpa, io, budget, c.bitstream);
         defer v.deinit();
         const frame = v.decode() catch |err| return switch (err) {
             error.Invalid => fail(d.options, error.Invalid, if (v.failure == .truncated) .truncated else .webp_lossy, c.at + v.failed_at),
             error.TooLarge => fail(d.options, error.TooLarge, .limit, c.at),
             error.OutOfMemory => error.OutOfMemory,
+            error.Canceled => error.Canceled,
         };
         vp8.rgba(&frame, rgba);
         if (c.alpha) |chunk| {
@@ -286,10 +296,11 @@ pub const Decoder = struct {
             defer d.gpa.free(plane);
             const base = @intFromPtr(chunk.ptr) - @intFromPtr(d.file.ptr);
             var failed_at: u64 = base;
-            alpha.decode(d.gpa, budget, chunk, base, w, h, plane, &failed_at) catch |err| return switch (err) {
+            alpha.decode(d.gpa, io, budget, chunk, base, w, h, plane, &failed_at) catch |err| return switch (err) {
                 error.Invalid => fail(d.options, error.Invalid, .webp_alpha, failed_at),
                 error.TooLarge => fail(d.options, error.TooLarge, .limit, base),
                 error.OutOfMemory => error.OutOfMemory,
+                error.Canceled => error.Canceled,
             };
             for (plane, 0..) |p, i| rgba[4 * i + 3] = p;
         }

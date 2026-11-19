@@ -18,11 +18,11 @@ const Outcome = enum { matched, refused_as_libjpeg, refused_where_libjpeg_recove
 fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     var diagnostic: aperture.Diagnostic = .{};
     var r: std.Io.Reader = .fixed(file);
-    var d_or = aperture.jpeg.Decoder.init(testing.allocator, null, &r, .{ .diagnostic = &diagnostic });
+    var d_or = aperture.jpeg.Decoder.init(testing.allocator, &r, .{ .diagnostic = &diagnostic });
     var got: ?aperture.jpeg.Samples = null;
     var refusal: ?anyerror = null;
     if (d_or) |*d| {
-        if (d.samples()) |s| got = s else |err| refusal = err;
+        if (d.samples(testing.io)) |s| got = s else |err| refusal = err;
     } else |err| refusal = err;
     defer if (d_or) |*d| d.deinit() else |_| {};
 
@@ -106,19 +106,19 @@ test "Info names the stored colour model, and decode gives RGB from any of them"
         .{ .name = "testorig-ycck-progressive-q85", .kind = .ycck, .inverted = true, .native = .rgb8 },
     }) |c| {
         var r: std.Io.Reader = .fixed(try find(all, c.name));
-        var d = try aperture.jpeg.Decoder.init(testing.allocator, null, &r, .{});
+        var d = try aperture.jpeg.Decoder.init(testing.allocator, &r, .{});
         defer d.deinit();
         const info = d.info();
         try testing.expectEqual(c.kind, info.colour_model.?.kind);
         try testing.expectEqual(c.inverted, info.colour_model.?.inverted);
         try testing.expectEqual(c.native, info.native);
-        var image = try d.decode(.rgba8);
+        var image = try d.decode(testing.io, .rgba8);
         defer image.deinit();
         try testing.expectEqual(@as(u32, 227), image.width.raw());
         // Inverted (Adobe's) CMYK to RGB, as the decoder documents it: each
         // channel its sample times black's, over 255, rounded.
         if (c.kind == .cmyk or c.kind == .ycck) {
-            const samples = try d.samples();
+            const samples = try d.samples(testing.io);
             for (0..image.pixels.len / 4) |p| {
                 const k: u32 = samples.data[p * 4 + 3];
                 for (0..3) |i| {
@@ -147,12 +147,12 @@ fn anyBytes(all: []const [2][]const u8, case: *shakedown.Case) !void {
     }
     var r: std.Io.Reader = .fixed(input);
     const limits: aperture.Limits = .{ .memory = .literal("16MiB") };
-    var d = aperture.jpeg.Decoder.init(testing.allocator, null, &r, .{ .limits = limits }) catch |err| switch (err) {
+    var d = aperture.jpeg.Decoder.init(testing.allocator, &r, .{ .limits = limits }) catch |err| switch (err) {
         error.Invalid, error.Unsupported, error.Truncated, error.TooLarge => return,
         else => return err,
     };
     defer d.deinit();
-    var image = d.decode(.rgb8) catch |err| switch (err) {
+    var image = d.decode(testing.io, .rgb8) catch |err| switch (err) {
         error.Invalid, error.Unsupported, error.Truncated, error.TooLarge => return,
         else => return err,
     };

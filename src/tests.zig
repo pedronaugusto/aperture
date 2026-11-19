@@ -10,4 +10,5 @@ test {
     _ = @import("testing/jpeg_encode_test.zig");
     _ = @import("testing/webp_test.zig");
     _ = @import("testing/properties_test.zig");
+    _ = @import("testing/cancel_test.zig");
 }

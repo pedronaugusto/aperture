@@ -36,19 +36,19 @@ fn frameImage(gpa: std.mem.Allocator, d: *const aperture.png.Decoder, format: ap
 
 test "APNG: animated-red-blue's four frames composite to Wuffs's expected frames" {
     var r: std.Io.Reader = .fixed(red_blue);
-    var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+    var d: aperture.png.Decoder = try .init(testing.allocator, &r, .{});
     defer d.deinit();
     try testing.expectEqual(@as(?u32, 4), d.info().frames);
     var canvas = try frameImage(testing.allocator, &d, .rgba8);
     defer canvas.deinit();
     for (red_blue_frames) |expected| {
-        const info = (try d.nextFrame(canvas.mutable())) orelse return error.TestUnexpectedResult;
+        const info = (try d.nextFrame(testing.io, canvas.mutable())) orelse return error.TestUnexpectedResult;
         _ = info;
         const want = try nie(testing.allocator, expected);
         defer testing.allocator.free(want);
         try testing.expectEqualSlices(u8, want, canvas.pixels);
     }
-    try testing.expectEqual(@as(?aperture.png.FrameInfo, null), try d.nextFrame(canvas.mutable()));
+    try testing.expectEqual(@as(?aperture.png.FrameInfo, null), try d.nextFrame(testing.io, canvas.mutable()));
 }
 
 test "APNG: a default image after which the first fcTL comes is not a frame, and decode still gives it" {
@@ -59,39 +59,39 @@ test "APNG: a default image after which the first fcTL comes is not a frame, and
         try testing.expectEqualSlices(u8, &.{ 0x20, 0, 0, 0x50, 0, 0, 0x80, 0, 0, 0x40, 0, 0, 0xa0, 0, 0, 0xff, 0, 0 }, image.pixels);
     }
     var r: std.Io.Reader = .fixed(skip_idat);
-    var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+    var d: aperture.png.Decoder = try .init(testing.allocator, &r, .{});
     defer d.deinit();
     var canvas = try frameImage(testing.allocator, &d, .rgb8);
     defer canvas.deinit();
-    const first = (try d.nextFrame(canvas.mutable())).?;
+    const first = (try d.nextFrame(testing.io, canvas.mutable())).?;
     try testing.expectEqual(aperture.png.Delay{ .num = 1, .den = 1 }, first.delay);
     try testing.expectEqualSlices(u8, &.{ 0, 0x20, 0x20, 0, 0x50, 0x50, 0, 0x80, 0x80, 0, 0x40, 0x40, 0, 0xa0, 0xa0, 0, 0xff, 0xff }, canvas.pixels);
-    const second = (try d.nextFrame(canvas.mutable())).?;
+    const second = (try d.nextFrame(testing.io, canvas.mutable())).?;
     try testing.expectEqual(aperture.Frames.Rect{ .x = 2, .y = 0, .width = 1, .height = 2 }, second.rect);
     try testing.expectEqualSlices(u8, &.{ 0, 0x20, 0x20, 0, 0x50, 0x50, 0x80, 0x80, 0x80, 0, 0x40, 0x40, 0, 0xa0, 0xa0, 0xff, 0xff, 0xff }, canvas.pixels);
-    try testing.expectEqual(@as(?aperture.png.FrameInfo, null), try d.nextFrame(canvas.mutable()));
+    try testing.expectEqual(@as(?aperture.png.FrameInfo, null), try d.nextFrame(testing.io, canvas.mutable()));
 }
 
 test "APNG: muybridge's frames all decode, and a work limit stops them by name" {
     var r: std.Io.Reader = .fixed(muybridge);
-    var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+    var d: aperture.png.Decoder = try .init(testing.allocator, &r, .{});
     defer d.deinit();
     const total = d.info().frames.?;
     var canvas = try frameImage(testing.allocator, &d, .rgba8);
     defer canvas.deinit();
     var n: u32 = 0;
-    while (try d.nextFrame(canvas.mutable())) |_| n += 1;
+    while (try d.nextFrame(testing.io, canvas.mutable())) |_| n += 1;
     try testing.expectEqual(total, n);
 
     const info = d.info();
     const one: u64 = @as(u64, info.width.raw()) * info.height.raw();
     var r2: std.Io.Reader = .fixed(muybridge);
     var diag: aperture.Diagnostic = .{};
-    var d2: aperture.png.Decoder = try .init(testing.allocator, null, &r2, .{ .limits = .{ .work = .fromRaw(one * 2) }, .diagnostic = &diag });
+    var d2: aperture.png.Decoder = try .init(testing.allocator, &r2, .{ .limits = .{ .work = .fromRaw(one * 2) }, .diagnostic = &diag });
     defer d2.deinit();
-    _ = (try d2.nextFrame(canvas.mutable())).?;
-    _ = (try d2.nextFrame(canvas.mutable())).?;
-    try testing.expectError(error.TooLarge, d2.nextFrame(canvas.mutable()));
+    _ = (try d2.nextFrame(testing.io, canvas.mutable())).?;
+    _ = (try d2.nextFrame(testing.io, canvas.mutable())).?;
+    try testing.expectError(error.TooLarge, d2.nextFrame(testing.io, canvas.mutable()));
     try testing.expectEqual(aperture.Diagnostic.Reason.limit, diag.reason);
 }
 
@@ -102,11 +102,11 @@ test "a still PNG is one frame" {
     defer file.deinit();
     try aperture.png.encode(testing.allocator, &file.writer, view, .{});
     var r: std.Io.Reader = .fixed(file.written());
-    var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+    var d: aperture.png.Decoder = try .init(testing.allocator, &r, .{});
     defer d.deinit();
     var canvas = try frameImage(testing.allocator, &d, .rgb8);
     defer canvas.deinit();
-    _ = (try d.nextFrame(canvas.mutable())).?;
+    _ = (try d.nextFrame(testing.io, canvas.mutable())).?;
     try testing.expectEqualSlices(u8, &px, canvas.pixels);
-    try testing.expectEqual(@as(?aperture.png.FrameInfo, null), try d.nextFrame(canvas.mutable()));
+    try testing.expectEqual(@as(?aperture.png.FrameInfo, null), try d.nextFrame(testing.io, canvas.mutable()));
 }

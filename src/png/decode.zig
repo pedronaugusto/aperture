@@ -50,7 +50,15 @@ pub const ReadError = error{
     /// The pixel format asked for cannot be written from this image:
     /// `indexed8` from an image without a palette (quantize is its step).
     Unsupported,
+    /// The call's `io` was canceled: the decode checks once per band of rows
+    /// (and per MiB of pixel data inflated) and stops there.
+    Canceled,
 };
+
+/// How often a decode checks its `io` for a cancel: once per this many rows,
+/// and once per this many bytes of pixel data inflated.
+const band_rows = 64;
+const band_bytes = 1 << 20;
 
 pub const Colour = enum(u8) { gray = 0, rgb = 2, palette = 3, gray_alpha = 4, rgba = 6 };
 
@@ -148,10 +156,7 @@ pub const Decoder = struct {
     rows: ?RowStream = null,
 
     /// Read the signature, IHDR and every chunk before the first IDAT.
-    /// `io` is unused until concurrent decoding comes; a sequential decoder
-    /// takes none.
-    pub fn init(gpa: Allocator, io: ?Io, reader: *Io.Reader, options: Options) InitError!Decoder {
-        _ = io;
+    pub fn init(gpa: Allocator, reader: *Io.Reader, options: Options) InitError!Decoder {
         var r: chunks.Reader = .{ .in = reader, .diagnostic = options.diagnostic };
         try r.readSignature();
         const ihdr = try r.next() orelse return r.fail(error.Truncated, .truncated, r.offset);
@@ -229,7 +234,7 @@ pub const Decoder = struct {
     }
 
     /// fcTL: its sequence number the next one, its numbers bounded.
-    fn readFrameControl(d: *Decoder, c: chunks.Header) ReadError!FrameInfo {
+    fn readFrameControl(d: *Decoder, c: chunks.Header) InitError!FrameInfo {
         if (c.len != 26) return d.chunk.fail(error.Invalid, .png_chunk_length, d.chunk.chunkStart());
         var b: [26]u8 = undefined;
         try d.chunk.data(&b);
@@ -383,7 +388,8 @@ pub const Decoder = struct {
     }
 
     /// The whole image in `want`, allocated from the decoder's allocator.
-    pub fn decode(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
+    /// The whole image in `want`; `io` is checked for a cancel once per band of rows.
+    pub fn decode(d: *Decoder, io: Io, want: pixel.PixelFormat) ReadError!Image {
         if (want == .indexed8 and d.header.colour != .palette) return error.Unsupported;
         const w = d.header.width.raw();
         const h = d.header.height.raw();
@@ -399,7 +405,7 @@ pub const Decoder = struct {
         }
         errdefer if (palette) |p| d.gpa.free(p);
         var image: Image = .{ .gpa = d.gpa, .width = d.header.width, .height = d.header.height, .format = want, .stride = stride, .pixels = pixels, .palette = palette };
-        try d.decodeInto(image.mutable());
+        try d.decodeInto(io, image.mutable());
         return image;
     }
 
@@ -409,13 +415,13 @@ pub const Decoder = struct {
     /// 32 KiB window, a row and the row before it. An interlaced image is
     /// decoded whole at the first call (Adam7's last pass fills every row)
     /// and handed out after.
-    pub fn readRows(d: *Decoder, out: []u8, stride: aegis.units.Bytes(usize), want: pixel.PixelFormat) ReadError!u32 {
+    pub fn readRows(d: *Decoder, io: Io, out: []u8, stride: aegis.units.Bytes(usize), want: pixel.PixelFormat) ReadError!u32 {
         const row_bytes = want.rowBytes(d.header.width.raw());
         aegis.assert.invariant(stride.compare(row_bytes) != .lt, "rows are a stride apart, at least a row long");
         if (want == .indexed8 and d.header.colour != .palette) return error.Unsupported;
         // The rows start once; after the last, every call gives none.
         if (!d.default_read) {
-            if (d.header.interlaced) d.image = try d.decode(want) else d.rows = try d.startRows();
+            if (d.header.interlaced) d.image = try d.decode(io, want) else d.rows = try d.startRows();
             d.rows_left = d.header.height.raw();
         }
         const room: aegis.units.Bytes(usize) = .fromRaw(out.len);
@@ -424,6 +430,7 @@ pub const Decoder = struct {
         const after = past_first.ratio(stride) catch aegis.assert.never("a stride is at least a row, never zero");
         const n: u32 = @intCast(@min(d.rows_left, after +| 1));
         for (0..n) |i| {
+            if (i % band_rows == 0) try io.checkCancel();
             const at = stride.mul(i) catch aegis.assert.never("row i starts within out, which holds it");
             const dst = out[at.raw()..][0..row_bytes.raw()];
             if (d.image) |*image| @memcpy(dst, image.view().row(d.next_row + i)) else try d.nextRow(want, dst);
@@ -532,29 +539,64 @@ pub const Decoder = struct {
         };
     }
 
-    fn decodeInto(d: *Decoder, out: Image.Mutable) ReadError!void {
+    /// `data`, one zlib stream, inflated into `out`; the bytes written. A
+    /// stream longer than `out` is `Invalid`, one that ends early `Truncated`.
+    /// Pixel data of one band or less is inflated whole, `out` its own
+    /// history, `io` checked before it; more goes through the streaming
+    /// inflate a band at a time, `io` checked before each, its 32 KiB window
+    /// charged to the budget.
+    fn inflateBanded(d: *Decoder, io: Io, data: []const u8, out: []u8, expected: usize, at: u64) ReadError!usize {
+        try io.checkCancel();
+        if (expected <= band_bytes) {
+            var z: warp.Decompressor = .init;
+            const r = z.inflate(data, out, .{ .accept = .zlib }) catch |err| return switch (err) {
+                error.ChecksumMismatch => d.chunk.fail(error.Corrupt, .pixel_data, at),
+                error.Truncated => d.chunk.fail(error.Truncated, .pixel_data, at),
+                else => d.chunk.fail(error.Invalid, .pixel_data, at),
+            };
+            return r.out_len;
+        }
+        const options: warp.Inflate.Options = .{ .accept = .zlib };
+        try d.charge(options.windowLen());
+        const window = try d.gpa.alloc(u8, options.windowLen());
+        defer d.gpa.free(window);
+        var inflate = warp.Inflate.init(window, options) catch aegis.assert.never("a window of the options' length, which are valid");
+        var in_at: usize = 0;
+        var out_at: usize = 0;
+        while (true) {
+            try io.checkCancel();
+            const end = @min(out.len, out_at + band_bytes);
+            const step = inflate.decode(data[in_at..], out[out_at..end]) catch |err| return d.inflateFailed(err, at);
+            in_at += step.in_len;
+            out_at += step.out_len;
+            switch (step.status) {
+                .done => return out_at,
+                // Every byte of the stream taken and it goes on.
+                .need_input => return d.chunk.fail(error.Truncated, .pixel_data, at),
+                .output_full => if (end == out.len) return d.chunk.fail(error.Invalid, .pixel_data, at),
+                .block_end, .member_end => {},
+            }
+        }
+    }
+
+    fn decodeInto(d: *Decoder, io: Io, out: Image.Mutable) ReadError!void {
         const idat = try d.gatherData();
         defer d.gpa.free(idat);
         d.default_read = true;
-        try d.pixelsInto(idat, d.first_idat_start, out);
+        try d.pixelsInto(io, idat, d.first_idat_start, out);
     }
 
     /// The pixels of `data` (one zlib stream of filtered rows, of `out`'s
     /// size), unfiltered and converted into `out`.
-    fn pixelsInto(d: *Decoder, data: []const u8, at: u64, out: Image.Mutable) ReadError!void {
+    fn pixelsInto(d: *Decoder, io: Io, data: []const u8, at: u64, out: Image.Mutable) ReadError!void {
         const w = out.width.raw();
         const h = out.height.raw();
         const expected = filteredLen(d.header, w, h);
         try d.charge(expected + warp.inflate_margin);
         const rows = try d.gpa.alloc(u8, expected + warp.inflate_margin);
         defer d.gpa.free(rows);
-        var z: warp.Decompressor = .init;
-        const r = z.inflate(data, rows, .{ .accept = .zlib }) catch |err| return switch (err) {
-            error.ChecksumMismatch => d.chunk.fail(error.Corrupt, .pixel_data, at),
-            error.Truncated => d.chunk.fail(error.Truncated, .pixel_data, at),
-            else => d.chunk.fail(error.Invalid, .pixel_data, at),
-        };
-        if (r.out_len != expected) return d.chunk.fail(if (r.out_len < expected) error.Truncated else error.Invalid, .pixel_data, at);
+        const out_len = try d.inflateBanded(io, data, rows, expected, at);
+        if (out_len != expected) return d.chunk.fail(if (out_len < expected) error.Truncated else error.Invalid, .pixel_data, at);
 
         const native_format = d.native();
         const scratch_bytes = native_format.rowBytes(w).add(.fromRaw(d.header.rowBytes(w))) catch return d.chunk.fail(error.TooLarge, .limit, 8);
@@ -571,6 +613,7 @@ pub const Decoder = struct {
             const rb = d.header.rowBytes(p.width);
             var prior: []const u8 = zeros[0..rb];
             for (0..p.height) |y| {
+                if (y % band_rows == 0) try io.checkCancel();
                 const f = rows[offset];
                 const row = rows[offset + 1 ..][0..rb];
                 offset += 1 + rb;
@@ -654,14 +697,14 @@ pub const Decoder = struct {
     /// one call each. Null after the last. Each frame's composited pixels
     /// are charged to `Limits.work` before it is decoded. Use either this or
     /// `decode`/`readRows` on one decoder, not both.
-    pub fn nextFrame(d: *Decoder, out: Image.Mutable) ReadError!?FrameInfo {
+    pub fn nextFrame(d: *Decoder, io: Io, out: Image.Mutable) ReadError!?FrameInfo {
         aegis.assert.invariant(out.width.eql(d.header.width) and out.height.eql(d.header.height), "a frame is written at the canvas's size");
         if (out.format == .indexed8) return error.Unsupported;
         if (d.ended) return null;
         const whole: Frames.Rect = .{ .x = 0, .y = 0, .width = d.header.width.raw(), .height = d.header.height.raw() };
         const anim = d.anim orelse {
             d.ended = true;
-            try d.decodeInto(out);
+            try d.decodeInto(io, out);
             return .{ .rect = whole, .delay = .{ .num = 0, .den = 0 }, .dispose = .none, .blend = .source };
         };
         if (d.frames == null) {
@@ -717,7 +760,7 @@ pub const Decoder = struct {
         const pixels = try d.gpa.alloc(u8, size.raw());
         defer d.gpa.free(pixels);
         const frame: Image.Mutable = .{ .width = fw, .height = fh, .format = .rgba16, .stride = stride, .pixels = pixels };
-        try d.pixelsInto(data, at, frame);
+        try d.pixelsInto(io, data, at, frame);
         frames.draw(control.rect, control.dispose, control.blend, frame.view(), d.frame_index == 0);
         d.frame_index += 1;
 

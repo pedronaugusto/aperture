@@ -68,14 +68,14 @@ test "PngSuite: every file Wuffs decodes is decoded to its pixels, every one it 
             }
             // The same pixels row by row, a few rows a call.
             var r2: std.Io.Reader = .fixed(fields[1]);
-            var d: aperture.png.Decoder = try .init(testing.allocator, null, &r2, .{});
+            var d: aperture.png.Decoder = try .init(testing.allocator, &r2, .{});
             defer d.deinit();
             const rows = try testing.allocator.alloc(u8, image.pixels.len);
             defer testing.allocator.free(rows);
             const row = image.stride.raw();
             var y: usize = 0;
             while (y < h) {
-                const n = try d.readRows(rows[y * row .. @min(rows.len, (y + 3) * row)], image.stride, .rgba16);
+                const n = try d.readRows(testing.io, rows[y * row .. @min(rows.len, (y + 3) * row)], image.stride, .rgba16);
                 try testing.expect(n > 0);
                 y += n;
             }

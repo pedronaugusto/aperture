@@ -64,9 +64,9 @@ pub const DecodeOptions = struct {
 pub const DecodeError = png.InitError || png.ReadError || gif.InitError || gif.ReadError || jpeg.InitError || jpeg.ReadError || webp.InitError || webp.ReadError;
 
 /// One-shot: the format from the first bytes, its header, then the whole
-/// image converted to `want`.
+/// image converted to `want`. `io` is checked for a cancel once per band of
+/// the image's rows (`error.Canceled`).
 pub fn decode(gpa: Allocator, io: Io, reader: *Io.Reader, want: PixelFormat, options: DecodeOptions) DecodeError!Image {
-    _ = io;
     const prefix = reader.peek(12) catch |err| switch (err) {
         error.EndOfStream => reader.buffered(),
         error.ReadFailed => return error.ReadFailed,
@@ -77,24 +77,24 @@ pub fn decode(gpa: Allocator, io: Io, reader: *Io.Reader, want: PixelFormat, opt
     };
     switch (format) {
         .png => {
-            var d = try png.Decoder.init(gpa, null, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
+            var d = try png.Decoder.init(gpa, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
             defer d.deinit();
-            return d.decode(want);
+            return d.decode(io, want);
         },
         .gif => {
-            var d = try gif.Decoder.init(gpa, null, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
+            var d = try gif.Decoder.init(gpa, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
             defer d.deinit();
-            return d.decode(want);
+            return d.decode(io, want);
         },
         .jpeg => {
-            var d = try jpeg.Decoder.init(gpa, null, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
+            var d = try jpeg.Decoder.init(gpa, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
             defer d.deinit();
-            return d.decode(want);
+            return d.decode(io, want);
         },
         .webp => {
-            var d = try webp.Decoder.init(gpa, null, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
+            var d = try webp.Decoder.init(gpa, reader, .{ .limits = options.limits, .diagnostic = options.diagnostic });
             defer d.deinit();
-            return d.decode(want);
+            return d.decode(io, want);
         },
     }
 }

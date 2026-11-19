@@ -172,9 +172,9 @@ fn roundTrip(_: void, case: *shakedown.Case) !void {
     };
     const file = try encoded(gpa, view, options);
     var r: std.Io.Reader = .fixed(file);
-    var d = try aperture.jpeg.Decoder.init(gpa, null, &r, .{});
+    var d = try aperture.jpeg.Decoder.init(gpa, &r, .{});
     defer d.deinit();
-    var image = try d.decode(format);
+    var image = try d.decode(testing.io, format);
     defer image.deinit();
     try testing.expectEqual(w, image.width.raw());
     try testing.expectEqual(h, image.height.raw());

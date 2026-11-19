@@ -424,7 +424,7 @@ fn animation(_: void, case: *Case) !void {
 
     const file = try apngOf(case, frames, w, h, default_is_frame);
     var r: std.Io.Reader = .fixed(file);
-    var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+    var d: aperture.png.Decoder = try .init(testing.allocator, &r, .{});
     defer d.deinit();
     const stride = aperture.PixelFormat.rgba16.rowBytes(w);
     const out_px = try case.gpa.alloc(u8, stride.raw() * h);
@@ -466,7 +466,7 @@ fn animation(_: void, case: *Case) !void {
                 loose[at] = true;
             }
         };
-        const got = (try d.nextFrame(out)) orelse return error.TestUnexpectedResult;
+        const got = (try d.nextFrame(testing.io, out)) orelse return error.TestUnexpectedResult;
         try testing.expectEqual(f.rect, got.rect);
         try testing.expectEqual(f.dispose, got.dispose);
         try testing.expectEqual(f.blend, got.blend);
@@ -484,7 +484,7 @@ fn animation(_: void, case: *Case) !void {
         }
         last = .{ .rect = f.rect, .dispose = dispose, .blend = f.blend, .delay = f.delay, .px = f.px };
     }
-    try testing.expect((try d.nextFrame(out)) == null);
+    try testing.expect((try d.nextFrame(testing.io, out)) == null);
 }
 
 test "property: APNG frames composite as their disposal and blending say" {

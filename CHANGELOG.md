@@ -5,6 +5,15 @@ All notable changes to aperture are documented here. The format follows
 
 ## [Unreleased]
 
+### Breaking
+
+- Decoding is cancelable: the calls that decode pixels take the call's `Io` and check it once
+  per band of rows, returning `error.Canceled` with what they allocated freed. `png`, `gif`,
+  `jpeg` and `webp` `Decoder.decode(io, want)`, `nextFrame(io, out)`, `png.Decoder.readRows(io,
+  out, stride, want)` and `jpeg.Decoder.samples(io)` take it where they took none, and each
+  `ReadError` (so `DecodeError`) gains `Canceled`. `Decoder.init` reads only the header and
+  takes no `Io` (it took one it did not use). The one-shot `decode` uses the `Io` it took.
+
 ### Added
 
 - PNG decoding (`png.Decoder`, `decode`): every colour type and bit depth, Adam7, palette and

@@ -15,7 +15,7 @@ pub const Error = vp8l.Error;
 /// The alpha of a `width` by `height` image from `chunk` (the ALPH chunk's
 /// payload, at `base` in the file) into `out`, a byte a pixel. On
 /// `error.Invalid`, `failed_at` (when given) is where in the file.
-pub fn decode(gpa: Allocator, budget: *aegis.bounded.Budget(usize), chunk: []const u8, base: u64, width: u32, height: u32, out: []u8, failed_at: ?*u64) Error!void {
+pub fn decode(gpa: Allocator, io: std.Io, budget: *aegis.bounded.Budget(usize), chunk: []const u8, base: u64, width: u32, height: u32, out: []u8, failed_at: ?*u64) Error!void {
     aegis.assert.invariant(out.len == @as(usize, width) * height, "the plane is the image's size");
     if (failed_at) |p| p.* = base;
     if (chunk.len <= 1) return error.Invalid;
@@ -28,7 +28,7 @@ pub fn decode(gpa: Allocator, budget: *aegis.bounded.Budget(usize), chunk: []con
         if (data.len < out.len) return error.Invalid;
         @memcpy(out, data[0..out.len]);
     } else {
-        var l = vp8l.Decoder.init(gpa, budget, data, base + 1);
+        var l = vp8l.Decoder.init(gpa, io, budget, data, base + 1);
         defer l.deinit();
         const argb = l.alpha(width, height) catch |err| {
             if (failed_at) |p| p.* = l.offset();

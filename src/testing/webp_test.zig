@@ -25,7 +25,7 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     var diagnostic: aperture.Diagnostic = .{};
     var r: std.Io.Reader = .fixed(file);
     const refused = std.mem.startsWith(u8, verdict, "refused ");
-    var d = aperture.webp.Decoder.init(testing.allocator, null, &r, .{ .diagnostic = &diagnostic }) catch |err| {
+    var d = aperture.webp.Decoder.init(testing.allocator, &r, .{ .diagnostic = &diagnostic }) catch |err| {
         if (refused) return .refused_as_libwebp;
         std.debug.print("{s}: refused with {t} ({t} at {d}), libwebp decoded it\n", .{ name, err, diagnostic.reason, diagnostic.offset.raw() });
         return .differs;
@@ -38,7 +38,7 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
             std.debug.print("{s}: read, libwebp refused it ({s})\n", .{ name, verdict });
             return .differs;
         }
-        var image = d.decode(.rgba8) catch return .refused_as_libwebp;
+        var image = d.decode(testing.io, .rgba8) catch return .refused_as_libwebp;
         image.deinit();
         std.debug.print("{s}: decoded, libwebp refused it ({s})\n", .{ name, verdict });
         return .differs;
@@ -63,7 +63,7 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     if (!animated) {
         _ = f.next(); // the timestamp
         const hash = f.next().?;
-        var image = d.decode(.rgba8) catch |err| {
+        var image = d.decode(testing.io, .rgba8) catch |err| {
             std.debug.print("{s}: refused with {t} ({t} at {d}), libwebp decoded it\n", .{ name, err, diagnostic.reason, diagnostic.offset.raw() });
             return .differs;
         };
@@ -87,7 +87,7 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     const out: aperture.Mutable = .{ .width = info.width, .height = info.height, .format = .rgba8, .stride = stride, .pixels = px };
     var time: u64 = 0;
     for (0..decoded) |i| {
-        const frame = (d.nextFrame(out) catch |err| {
+        const frame = (d.nextFrame(testing.io, out) catch |err| {
             std.debug.print("{s}: frame {d} refused with {t} ({t} at {d}), libwebp composited it\n", .{ name, i, err, diagnostic.reason, diagnostic.offset.raw() });
             return .differs;
         }) orelse {
@@ -103,11 +103,11 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     }
     if (std.mem.eql(u8, refused_at, "-")) {
         if (decoded != frame_count) return error.TestUnexpectedResult; // the capture stops early only on a refusal
-        if (try d.nextFrame(out) != null) {
+        if (try d.nextFrame(testing.io, out) != null) {
             std.debug.print("{s}: a frame past libwebp's last\n", .{name});
             return .differs;
         }
-    } else if (d.nextFrame(out)) |_| {
+    } else if (d.nextFrame(testing.io, out)) |_| {
         std.debug.print("{s}: frame {d} composited, libwebp refused it\n", .{ name, decoded });
         return .differs;
     } else |_| {}
@@ -166,7 +166,7 @@ fn anyBytes(all: []const [3][]const u8, case: *shakedown.Case) !void {
     }
     var r: std.Io.Reader = .fixed(input);
     const limits: aperture.Limits = .{ .memory = .literal("16MiB") };
-    var d = aperture.webp.Decoder.init(testing.allocator, null, &r, .{ .limits = limits }) catch |err| switch (err) {
+    var d = aperture.webp.Decoder.init(testing.allocator, &r, .{ .limits = limits }) catch |err| switch (err) {
         error.Invalid, error.Truncated, error.TooLarge => return,
         else => return err,
     };
@@ -175,7 +175,7 @@ fn anyBytes(all: []const [3][]const u8, case: *shakedown.Case) !void {
     const stride = aperture.PixelFormat.rgba8.rowBytes(info.width.raw());
     if (stride.raw() * info.height.raw() > limits.memory.raw()) {
         // Past the memory limit: the decoder's own canvas is refused.
-        var image = d.decode(.rgba8) catch |err| switch (err) {
+        var image = d.decode(testing.io, .rgba8) catch |err| switch (err) {
             error.TooLarge => return,
             else => return err,
         };
@@ -184,7 +184,7 @@ fn anyBytes(all: []const [3][]const u8, case: *shakedown.Case) !void {
     }
     const px = try case.gpa.alloc(u8, stride.raw() * info.height.raw());
     const out: aperture.Mutable = .{ .width = info.width, .height = info.height, .format = .rgba8, .stride = stride, .pixels = px };
-    while (d.nextFrame(out) catch |err| switch (err) {
+    while (d.nextFrame(testing.io, out) catch |err| switch (err) {
         error.Invalid, error.TooLarge => return,
         else => return err,
     }) |_| {}
@@ -222,7 +222,7 @@ test "a VP8X canvas must be the image's size, as libwebp has it" {
         const f = try extended(testing.allocator, file[12..], size[0], size[1]);
         defer testing.allocator.free(f);
         var r: std.Io.Reader = .fixed(f);
-        const result = aperture.webp.Decoder.init(testing.allocator, null, &r, .{});
+        const result = aperture.webp.Decoder.init(testing.allocator, &r, .{});
         if (size[0] == 16 and size[1] == 16) {
             var d = try result;
             d.deinit();
@@ -249,11 +249,11 @@ fn stills(gpa: std.mem.Allocator, all: []const [3][]const u8) ![]Still {
         if (!std.mem.startsWith(u8, rec[2], "ok ") or file.len < 30) continue;
         const chunks = if (std.mem.eql(u8, file[12..16], "VP8X")) file[30..] else file[12..];
         var r: std.Io.Reader = .fixed(file);
-        var d = try aperture.webp.Decoder.init(gpa, null, &r, .{});
+        var d = try aperture.webp.Decoder.init(gpa, &r, .{});
         defer d.deinit();
         const info = d.info();
         if (info.width.raw() > 24 or info.height.raw() > 24) continue;
-        const image = try d.decode(.rgba8);
+        const image = try d.decode(testing.io, .rgba8);
         var opaque_ = true;
         for (0..image.pixels.len / 4) |i| opaque_ = opaque_ and image.pixels[4 * i + 3] == 255;
         try out.append(gpa, .{ .chunks = chunks, .w = info.width.raw(), .h = info.height.raw(), .rgba = image.pixels, .opaque_ = opaque_ });
@@ -319,7 +319,7 @@ fn wrapped(all: []const Still, case: *shakedown.Case) !void {
     std.mem.writeInt(u32, file.items[4..8], @intCast(file.items.len - 8), .little);
 
     var r: std.Io.Reader = .fixed(file.items);
-    var d = try aperture.webp.Decoder.init(testing.allocator, null, &r, .{});
+    var d = try aperture.webp.Decoder.init(testing.allocator, &r, .{});
     defer d.deinit();
     try testing.expectEqual(@as(?u32, @intCast(count)), d.info().frames);
     const stride = aperture.PixelFormat.rgba8.rowBytes(cw);
@@ -334,12 +334,12 @@ fn wrapped(all: []const Still, case: *shakedown.Case) !void {
             for (0..lp.h) |y| @memset(model[((l.y + y) * cw + l.x) * 4 ..][0 .. lp.w * 4], 0);
         }
         for (0..p.h) |y| @memcpy(model[((q.y + y) * cw + q.x) * 4 ..][0 .. p.w * 4], p.rgba[y * p.w * 4 ..][0 .. p.w * 4]);
-        const frame = (try d.nextFrame(out)).?;
+        const frame = (try d.nextFrame(testing.io, out)).?;
         try testing.expectEqual(aperture.Frames.Rect{ .x = q.x, .y = q.y, .width = p.w, .height = p.h }, frame.rect);
         try testing.expectEqual(q.duration, frame.delay.num);
         try testing.expectEqualSlices(u8, model, px);
     }
-    try testing.expectEqual(@as(?aperture.Frames.Frame, null), try d.nextFrame(out));
+    try testing.expectEqual(@as(?aperture.Frames.Frame, null), try d.nextFrame(testing.io, out));
 }
 
 test "property: stills as an animation's frames composite to the stills, placed and disposed of" {

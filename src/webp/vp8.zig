@@ -22,6 +22,8 @@ pub const Error = error{
     /// An allocation past the budget.
     TooLarge,
     OutOfMemory,
+    /// The decode's `io` was canceled.
+    Canceled,
 };
 
 /// Why a stream was refused, for the diagnostic.
@@ -226,6 +228,8 @@ pub const Frame = struct {
 };
 
 pub const Decoder = struct {
+    /// The one decode's: checked for a cancel, never kept past it.
+    io: std.Io,
     budget: *aegis.bounded.Budget(usize),
     /// The bitstream, from its frame tag on to the file's end.
     data: []const u8,
@@ -263,8 +267,10 @@ pub const Decoder = struct {
     use_skip_proba: bool = false,
     skip_proba: u8 = 0,
 
-    pub fn init(gpa: Allocator, budget: *aegis.bounded.Budget(usize), data: []const u8) Decoder {
-        return .{ .budget = budget, .data = data, .arena = .init(gpa) };
+    /// `io` is checked for a cancel once per band of macroblock rows, for the
+    /// one decode this decoder makes.
+    pub fn init(gpa: Allocator, io: std.Io, budget: *aegis.bounded.Budget(usize), data: []const u8) Decoder {
+        return .{ .io = io, .budget = budget, .data = data, .arena = .init(gpa) };
     }
 
     pub fn deinit(d: *Decoder) void {
@@ -459,6 +465,7 @@ pub const Decoder = struct {
 
         var row: Row = .{ .d = d, .intra_t = intra_t, .top_nz = top_nz, .tops = tops, .blocks = blocks, .finfo = finfo, .work = work[0..work_size], .f = f };
         for (0..d.mb_h) |mb_y| {
+            if (mb_y % 4 == 0) try d.io.checkCancel();
             const token = &d.parts[mb_y & @as(usize, d.parts_mask)];
             for (0..mb_w) |mb_x| row.intraMode(mb_x);
             if (d.br.eof) return d.fail(.truncated, d.data.len);

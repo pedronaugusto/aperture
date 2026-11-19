@@ -49,7 +49,14 @@ pub const ReadError = error{
     Truncated,
     ReadFailed,
     OutOfMemory,
+    /// The call's `io` was canceled: a decode checks once per band of MCU
+    /// rows, block rows or pixel rows, and stops there.
+    Canceled,
 };
+
+/// How often a decode checks its `io` for a cancel: once per this many rows
+/// (of MCUs in a scan, of blocks in the inverse DCT, of pixels after).
+const band_rows = 16;
 
 /// Private: a frame component and what is decoded of it.
 pub const Component = struct {
@@ -122,9 +129,8 @@ pub const Decoder = struct {
     samples_out: ?[]u8 = null,
 
     /// Read SOI and every segment up to and including the first scan's
-    /// header. `io` is unused; a sequential decoder takes none.
-    pub fn init(gpa: Allocator, io: ?Io, reader: *Io.Reader, options: Options) InitError!Decoder {
-        _ = io;
+    /// header.
+    pub fn init(gpa: Allocator, reader: *Io.Reader, options: Options) InitError!Decoder {
         var d: Decoder = .{
             .gpa = gpa,
             .src = .{ .in = reader, .diagnostic = options.diagnostic },
@@ -322,7 +328,7 @@ pub const Decoder = struct {
         }
     }
 
-    fn scanHeader(d: *Decoder, at: u64) ReadError!Scan {
+    fn scanHeader(d: *Decoder, at: u64) InitError!Scan {
         const len = try d.src.word();
         const n = try d.src.byte();
         if (n < 1 or n > 4 or len != 6 + @as(u32, n) * 2) return d.src.fail(error.Invalid, .jpeg_marker, at);
@@ -384,8 +390,9 @@ pub const Decoder = struct {
     }
 
     /// Every scan's data, then the samples libjpeg-turbo gives: 1 (gray),
-    /// 3 (RGB) or 4 (CMYK) a pixel. Borrowed from the decoder.
-    pub fn samples(d: *Decoder) ReadError!Samples {
+    /// 3 (RGB) or 4 (CMYK) a pixel. Borrowed from the decoder. `io` is
+    /// checked for a cancel once per band of rows.
+    pub fn samples(d: *Decoder, io: Io) ReadError!Samples {
         const nc: u3 = d.count;
         if (d.samples_out) |s| return .{ .data = s, .components = nc };
         for (d.components[0..d.count]) |*c| {
@@ -403,10 +410,10 @@ pub const Decoder = struct {
             first = false;
             d.scans += 1;
             if (d.progressive and aegis.units.Count(Limits.Scan, u16).fromRaw(d.scans).compare(d.options.limits.scans) == .gt) return d.src.fail(error.TooLarge, .limit, s.at);
-            try d.scan(s);
+            try d.scan(io, s);
             try d.untilScan();
         }
-        return .{ .data = try d.render(), .components = nc };
+        return .{ .data = try d.render(io), .components = nc };
     }
 
     /// Segments after a scan, up to the next scan's header or EOI.
@@ -427,7 +434,7 @@ pub const Decoder = struct {
     }
 
     /// A scan's checks, as libjpeg makes them, then its blocks.
-    fn scan(d: *Decoder, s: Scan) ReadError!void {
+    fn scan(d: *Decoder, io: Io, s: Scan) ReadError!void {
         const at = s.at;
         if (!d.progressive) {
             // libjpeg warns of a sequential scan with spectral or
@@ -483,6 +490,7 @@ pub const Decoder = struct {
         const units_x: u32 = if (one) c0.width_blocks else d.mcus_x;
         const units_y: u32 = if (one) c0.height_blocks else d.mcus_y;
         for (0..units_y) |my| for (0..units_x) |mx| {
+            if (mx == 0 and my % band_rows == 0) try io.checkCancel();
             if (interval != 0) {
                 if (to_go == 0) {
                     bits.restart() catch return d.src.fail(error.Invalid, .pixel_data, d.src.offset);
@@ -539,7 +547,7 @@ pub const Decoder = struct {
 
     /// The IDCT of every block, each component brought to the image's size,
     /// and the colour conversion: libjpeg-turbo's samples.
-    fn render(d: *Decoder) ReadError![]u8 {
+    fn render(d: *Decoder, io: Io) ReadError![]u8 {
         const w: usize = d.width.raw();
         const h: usize = d.height.raw();
         const nc: usize = d.count;
@@ -555,6 +563,7 @@ pub const Decoder = struct {
             const none: [64]u16 = @splat(0);
             const quant = &(c.quant orelse none);
             for (0..c.blocks_h) |by| for (0..c.blocks_w) |bx| {
+                if (bx == 0 and by % band_rows == 0) try io.checkCancel();
                 const b: *const [64]i16 = c.coefs[(by * c.blocks_w + bx) * 64 ..][0..64];
                 const out = plane[by * 8 * stride + bx * 8 ..];
                 // libjpeg smooths the blocks it outputs, those coded alone.
@@ -570,8 +579,10 @@ pub const Decoder = struct {
         }
         try d.charge(w * h * nc);
         const out = try d.gpa.alloc(u8, w * h * nc);
+        errdefer d.gpa.free(out);
         const m = d.model();
         for (0..w * h) |p| {
+            if (p % (band_rows * w) == 0) try io.checkCancel();
             const o = out[p * nc ..][0..nc];
             switch (m.kind) {
                 .gray => o[0] = full[0][p],
@@ -634,9 +645,9 @@ pub const Decoder = struct {
     /// The image in `want` (not `indexed8`), allocated from the decoder's
     /// allocator. CMYK becomes RGB: each channel its complement weighted by
     /// black's, Adobe's inverted samples read as they are stored.
-    pub fn decode(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
+    pub fn decode(d: *Decoder, io: Io, want: pixel.PixelFormat) ReadError!Image {
         if (want == .indexed8) return error.Unsupported;
-        const s = try d.samples();
+        const s = try d.samples(io);
         const w = d.width.raw();
         const h = d.height.raw();
         const stride = want.rowBytes(w);
@@ -648,6 +659,7 @@ pub const Decoder = struct {
         const m = d.model();
         const nc: usize = s.components;
         for (0..h) |y| {
+            if (y % band_rows == 0) try io.checkCancel();
             const row = image.mutable().row(y);
             for (0..w) |x| {
                 const p = s.data[(y * w + x) * nc ..][0..nc];

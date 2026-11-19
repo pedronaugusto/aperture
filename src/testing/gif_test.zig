@@ -43,7 +43,7 @@ fn check(gpa: std.mem.Allocator, name: []const u8, file: []const u8, verdict: []
     var diagnostic: aperture.Diagnostic = .{};
     var r: std.Io.Reader = .fixed(file);
     if (std.mem.startsWith(u8, head, "refused ")) {
-        if (aperture.gif.Decoder.init(gpa, null, &r, .{ .diagnostic = &diagnostic })) |ok| {
+        if (aperture.gif.Decoder.init(gpa, &r, .{ .diagnostic = &diagnostic })) |ok| {
             var d = ok;
             d.deinit();
             std.debug.print("{s}: decoded, Wuffs refused it ({s})\n", .{ name, head });
@@ -54,7 +54,7 @@ fn check(gpa: std.mem.Allocator, name: []const u8, file: []const u8, verdict: []
     try testing.expectEqualStrings("image", words.next().?);
     const w = try std.fmt.parseInt(u32, words.next().?, 10);
     const h = try std.fmt.parseInt(u32, words.next().?, 10);
-    var d = aperture.gif.Decoder.init(gpa, null, &r, .{ .diagnostic = &diagnostic }) catch |err| {
+    var d = aperture.gif.Decoder.init(gpa, &r, .{ .diagnostic = &diagnostic }) catch |err| {
         std.debug.print("{s}: refused at init with {t} ({t}), Wuffs decoded it\n", .{ name, err, diagnostic.reason });
         return error.TestUnexpectedResult;
     };
@@ -73,7 +73,7 @@ fn check(gpa: std.mem.Allocator, name: []const u8, file: []const u8, verdict: []
         if (std.mem.eql(u8, kind, "end")) {
             const how = f.next().?;
             if (std.mem.eql(u8, how, "ok")) {
-                const got = d.nextFrame(out) catch |err| {
+                const got = d.nextFrame(testing.io, out) catch |err| {
                     std.debug.print("{s}: frame {d} refused with {t} ({t}), Wuffs ends there\n", .{ name, index, err, diagnostic.reason });
                     return error.TestUnexpectedResult;
                 };
@@ -84,7 +84,7 @@ fn check(gpa: std.mem.Allocator, name: []const u8, file: []const u8, verdict: []
                 try testing.expectEqual(try std.fmt.parseInt(u32, f.next().?, 10), d.loops());
             } else {
                 const status = line["end refused ".len..];
-                if (d.nextFrame(out)) |got| {
+                if (d.nextFrame(testing.io, out)) |got| {
                     std.debug.print("{s}: frame {d} decoded ({any}), Wuffs refused it ({s})\n", .{ name, index, got, status });
                     return error.TestUnexpectedResult;
                 } else |err| try expectRefused(name, try refusalOf(status), err, diagnostic);
@@ -95,7 +95,7 @@ fn check(gpa: std.mem.Allocator, name: []const u8, file: []const u8, verdict: []
         var nums: [6]u32 = undefined;
         for (&nums) |*n| n.* = try std.fmt.parseInt(u32, f.next().?, 10);
         const want_hash = f.next().?;
-        const frame = (d.nextFrame(out) catch |err| {
+        const frame = (d.nextFrame(testing.io, out) catch |err| {
             std.debug.print("{s}: frame {d} refused with {t} ({t}), Wuffs decoded it\n", .{ name, index, err, diagnostic.reason });
             return error.TestUnexpectedResult;
         }) orelse {
@@ -205,7 +205,7 @@ fn anyBytes(files: []const []const u8, case: *shakedown.Case) !void {
     }
     const limits: aperture.Limits = .{ .memory = .literal("8MiB"), .pixels = .fromRaw(1 << 18), .frames = .fromRaw(32) };
     var r: std.Io.Reader = .fixed(input);
-    var d = aperture.gif.Decoder.init(testing.allocator, null, &r, .{ .limits = limits }) catch |err| switch (err) {
+    var d = aperture.gif.Decoder.init(testing.allocator, &r, .{ .limits = limits }) catch |err| switch (err) {
         error.Invalid, error.Truncated, error.TooLarge => return,
         else => return err,
     };
@@ -215,7 +215,7 @@ fn anyBytes(files: []const []const u8, case: *shakedown.Case) !void {
     const px = try case.gpa.alloc(u8, stride.raw() * info.height.raw());
     const out: aperture.Mutable = .{ .width = info.width, .height = info.height, .format = .rgba8, .stride = stride, .pixels = px };
     while (true) {
-        const next = d.nextFrame(out) catch |err| switch (err) {
+        const next = d.nextFrame(testing.io, out) catch |err| switch (err) {
             error.Invalid, error.Truncated, error.TooLarge => return,
             else => return err,
         };

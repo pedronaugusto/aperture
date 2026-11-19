@@ -38,9 +38,10 @@ from the header before a pixel is read. A progressive JPEG keeps its coefficient
 keeps its image, since the formats require it; both are charged to the budget before they are allocated.
 
 **Whole or by rows.** The one-shot decode knows the whole image's size from the header, so PNG's
-inflate runs through warp's whole-buffer decompressor straight into a buffer of exactly the filtered
-rows' bytes, with partial output refused: a stream that would expand past it is `Invalid`, never
-memory. The rows are then unfiltered in place and converted. `readRows` is the low-memory path: warp's
+inflate writes straight into a buffer of exactly the filtered rows' bytes: through warp's
+whole-buffer decompressor, the buffer its own history, when they are a MiB or less, and through its
+streaming inflate a MiB at a time (a cancel point between, its 32 KiB window charged) when more.
+Output past the buffer is refused: a stream that would expand past it is `Invalid`, never memory. The rows are then unfiltered in place and converted. `readRows` is the low-memory path: warp's
 streaming inflate across the chunks, one row and the previous one in memory.
 
 **One frame model.** A still image is one frame; GIF, APNG and animated WebP give frames already
@@ -77,9 +78,13 @@ program does not name is dropped by lazy analysis.
 ## Io and cancellation
 
 Decoders allocate from `gpa` under `Limits.memory` and nothing per row, and read through the caller's
-reader. A decoder does no work between calls: `readRows` returns to the caller after each call, which is
-where a caller cancels. The decoders and the one-shot `decode` take an `Io` they do not use yet; nothing
-in aperture runs concurrently or starts a thread.
+reader. A decoder does no work between calls. The calls that decode pixels take the call's `Io` (`decode`,
+`readRows`, `nextFrame`, JPEG's `samples`, and the one-shot `decode`); `init` reads only the header and
+takes none. Each checks the `Io` for a cancel once per band of rows (PNG's rows and each MiB it
+inflates, JPEG's MCU and block rows, GIF's decoded MiB, WebP's macroblock rows and lossless pixels, and
+the rows each format composites) and returns `error.Canceled` there, everything it allocated freed. The
+`Io` is the call's: WebP's internal bitstream decoders hold it for the one decode they make, no longer.
+Nothing in aperture runs concurrently or starts a thread.
 
 ## Safety
 

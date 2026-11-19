@@ -70,10 +70,10 @@ const Decode = struct {
                 image.deinit();
                 continue;
             }
-            var d = try aperture.png.Decoder.init(c.gpa, null, &r, .{});
+            var d = try aperture.png.Decoder.init(c.gpa, &r, .{});
             defer d.deinit();
             const stride = aperture.PixelFormat.rgba8.rowBytes(d.info().width.raw());
-            while (try d.readRows(c.buf, stride, .rgba8) > 0) {}
+            while (try d.readRows(c.io, c.buf, stride, .rgba8) > 0) {}
         }
     }
 };

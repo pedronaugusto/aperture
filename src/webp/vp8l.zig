@@ -20,9 +20,14 @@ pub const Error = error{
     /// An allocation past the budget.
     TooLarge,
     OutOfMemory,
+    /// The decode's `io` was canceled.
+    Canceled,
 };
 
 pub const signature = 0x2f;
+
+/// How often the pixels check their `io` for a cancel: once per this many.
+const band_pixels = 1 << 18;
 
 /// What a VP8L bitstream's first five bytes say.
 pub const Header = struct { width: u32, height: u32, alpha: bool };
@@ -226,6 +231,8 @@ fn subsample(size: u32, bits: u5) u32 {
 /// charges, the transforms read.
 pub const Decoder = struct {
     gpa: Allocator,
+    /// The one image's: checked for a cancel, never kept past it.
+    io: std.Io,
     budget: *aegis.bounded.Budget(usize),
     bits: Bits,
     /// Where `bits` starts in the file, for the diagnostic.
@@ -245,8 +252,10 @@ pub const Decoder = struct {
     /// the stream end inside the last pixel's code.
     lenient: bool = false,
 
-    pub fn init(gpa: Allocator, budget: *aegis.bounded.Budget(usize), data: []const u8, base: u64) Decoder {
-        return .{ .gpa = gpa, .budget = budget, .bits = .init(data), .base = base };
+    /// `io` is checked for a cancel once per band of pixels decoded, for the
+    /// one image this decoder reads.
+    pub fn init(gpa: Allocator, io: std.Io, budget: *aegis.bounded.Budget(usize), data: []const u8, base: u64) Decoder {
+        return .{ .gpa = gpa, .io = io, .budget = budget, .bits = .init(data), .base = base };
     }
 
     pub fn deinit(d: *Decoder) void {
@@ -501,7 +510,13 @@ pub const Decoder = struct {
         var col: u32 = 0;
         var row: u32 = 0;
         var cached: usize = 0;
+        // Where the next cancel check falls: once per band of pixels.
+        var check_at: usize = 0;
         while (i < out.len) {
+            if (i >= check_at) {
+                try d.io.checkCancel();
+                check_at = i + band_pixels;
+            }
             const g = if (meta.len == 0) &groups[0] else &groups[meta[@as(usize, row >> meta_bits) * meta_width + (col >> meta_bits)]];
             const code = g[0].decode(&d.bits);
             if (code < literal_codes) {
@@ -746,13 +761,13 @@ fn coded(max: u32, zeros: usize) Writer {
 test "a symbol count past the alphabet is refused; within it, the rest are zero" {
     var budget: aegis.bounded.Budget(usize) = .init(1 << 20);
     const ok = coded(2, 0);
-    var d = Decoder.init(std.testing.allocator, &budget, ok.data(), 0);
+    var d = Decoder.init(std.testing.allocator, std.testing.io, &budget, ok.data(), 0);
     defer d.deinit();
     const px = try d.image(1, 1);
     try std.testing.expectEqual(@as(u32, 0x100), px[0]);
     // 280 symbols' lengths given, but a count of more: libwebp refuses.
     const past = coded(281, 278);
-    var e = Decoder.init(std.testing.allocator, &budget, past.data(), 0);
+    var e = Decoder.init(std.testing.allocator, std.testing.io, &budget, past.data(), 0);
     defer e.deinit();
     try std.testing.expectError(error.Invalid, e.image(1, 1));
 }
@@ -769,7 +784,7 @@ test "a transform given twice is refused" {
     w.put(0, 3); // no more, no cache, no meta codes
     for (0..5) |_| w.single();
     var budget: aegis.bounded.Budget(usize) = .init(1 << 20);
-    var d = Decoder.init(std.testing.allocator, &budget, w.data(), 0);
+    var d = Decoder.init(std.testing.allocator, std.testing.io, &budget, w.data(), 0);
     defer d.deinit();
     try std.testing.expectError(error.Invalid, d.image(1, 1));
 }

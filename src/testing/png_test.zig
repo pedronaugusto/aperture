@@ -91,7 +91,7 @@ test "a reduced image is smaller and decodes to the same pixels in the source's 
     try testing.expect(small.len < full.len);
     var d: aperture.png.Decoder = undefined;
     var r: std.Io.Reader = .fixed(small);
-    d = try .init(gpa, null, &r, .{});
+    d = try .init(gpa, &r, .{});
     try testing.expectEqual(aperture.PixelFormat.gray8, d.info().native);
 }
 
@@ -207,19 +207,19 @@ test "readRows streams the rows decode gives, in any number at a time, at any st
         const whole = try decoded(gpa, bytes, format, .{});
         for ([_]u32{ 1, 2, 7, 1000 }) |batch| {
             var r: std.Io.Reader = .fixed(bytes);
-            var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+            var d: aperture.png.Decoder = try .init(testing.allocator, &r, .{});
             defer d.deinit();
             const row = format.rowBytes(size[0]).raw();
             const stride = row + 3;
             const buf = try gpa.alloc(u8, stride * batch);
             var y: u32 = 0;
             while (y < size[1]) {
-                const n = try d.readRows(buf, .fromRaw(stride), format);
+                const n = try d.readRows(testing.io, buf, .fromRaw(stride), format);
                 try testing.expect(n > 0);
                 for (0..n) |i| try testing.expectEqualSlices(u8, whole.view().row(y + i), buf[i * stride ..][0..row]);
                 y += n;
             }
-            try testing.expectEqual(@as(u32, 0), try d.readRows(buf, .fromRaw(stride), format));
+            try testing.expectEqual(@as(u32, 0), try d.readRows(testing.io, buf, .fromRaw(stride), format));
         }
     };
 }
@@ -233,10 +233,10 @@ test "readRows refuses pixel data cut short or running past the rows, as decode 
     const bytes = try encoded(gpa, image.view(), .{});
     for ([_]usize{ 60, 200, bytes.len - 13 }) |cut| {
         var r: std.Io.Reader = .fixed(bytes[0..cut]);
-        var d: aperture.png.Decoder = try .init(testing.allocator, null, &r, .{});
+        var d: aperture.png.Decoder = try .init(testing.allocator, &r, .{});
         defer d.deinit();
         const buf = try gpa.alloc(u8, 40 * 3 * 40);
-        if (d.readRows(buf, .fromRaw(120), .rgb8)) |_| return error.TestUnexpectedResult else |err| try testing.expect(err == error.Truncated or err == error.Invalid);
+        if (d.readRows(testing.io, buf, .fromRaw(120), .rgb8)) |_| return error.TestUnexpectedResult else |err| try testing.expect(err == error.Truncated or err == error.Invalid);
     }
 }
 

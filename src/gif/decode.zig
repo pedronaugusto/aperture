@@ -48,7 +48,15 @@ pub const ReadError = error{
     OutOfMemory,
     /// `indexed8` asked for: a GIF's frames are composited in colour.
     Unsupported,
+    /// The call's `io` was canceled: a frame checks once per MiB of pixels
+    /// decoded and per band of canvas rows, and stops there.
+    Canceled,
 };
+
+/// How often a frame checks its `io` for a cancel: once per this many bytes of
+/// pixels decoded, and once per this many canvas rows written out.
+const band_bytes = 1 << 20;
+const band_rows = 64;
 
 /// Private: the graphic control for the next image, reset after each.
 pub const Control = struct {
@@ -92,10 +100,8 @@ pub const Decoder = struct {
     lzw: ?*warp.lzw.Decompress = null,
 
     /// Read the header, the logical screen, the global palette and every
-    /// block up to the first image's descriptor. `io` is unused; a
-    /// sequential decoder takes none.
-    pub fn init(gpa: Allocator, io: ?Io, reader: *Io.Reader, options: Options) InitError!Decoder {
-        _ = io;
+    /// block up to the first image's descriptor.
+    pub fn init(gpa: Allocator, reader: *Io.Reader, options: Options) InitError!Decoder {
         var d: Decoder = .{
             .gpa = gpa,
             .in = reader,
@@ -153,7 +159,7 @@ pub const Decoder = struct {
     /// The first frame composited, in `want` (not `indexed8`), allocated
     /// from the decoder's allocator; the clear canvas for a file without
     /// frames.
-    pub fn decode(d: *Decoder, want: pixel.PixelFormat) ReadError!Image {
+    pub fn decode(d: *Decoder, io: Io, want: pixel.PixelFormat) ReadError!Image {
         if (want == .indexed8) return error.Unsupported;
         const stride = want.rowBytes(d.width.raw());
         const size = stride.mul(d.height.raw()) catch return d.fail(error.TooLarge, .limit, d.offset);
@@ -162,7 +168,7 @@ pub const Decoder = struct {
         errdefer d.gpa.free(pixels);
         @memset(pixels, 0);
         var image: Image = .{ .gpa = d.gpa, .width = d.width, .height = d.height, .format = want, .stride = stride, .pixels = pixels };
-        _ = try d.nextFrame(image.mutable());
+        _ = try d.nextFrame(io, image.mutable());
         return image;
     }
 
@@ -171,7 +177,7 @@ pub const Decoder = struct {
     /// to the canvas, perhaps empty), delay and disposal. Null after the
     /// last. Each frame's canvas is charged to `Limits.work` before its
     /// pixels are decoded.
-    pub fn nextFrame(d: *Decoder, out: Image.Mutable) ReadError!?Frames.Frame {
+    pub fn nextFrame(d: *Decoder, io: Io, out: Image.Mutable) ReadError!?Frames.Frame {
         aegis.assert.invariant(out.width.eql(d.width) and out.height.eql(d.height), "a frame is written at the canvas's size");
         if (out.format == .indexed8) return error.Unsupported;
         if (d.ended) return null;
@@ -217,7 +223,7 @@ pub const Decoder = struct {
         const frames = &d.frames.?;
         frames.begin(rect, d.control.dispose, d.frame_index == 0);
         var place: Placer = .{ .frames = frames, .desc = desc, .colours = &colours, .x = desc.x0, .y = desc.y0, .pass = if (flags & 0x40 != 0) 4 else 0 };
-        try d.decodePixels(&place, desc.at);
+        try d.decodePixels(io, &place, desc.at);
         // Short of the frame's last row: refused, unless the frame is empty.
         if (place.y < desc.y1 and desc.x0 != desc.x1 and desc.y0 != desc.y1) return d.fail(error.Invalid, .pixel_data, desc.at);
 
@@ -226,6 +232,7 @@ pub const Decoder = struct {
         d.frame_index += 1;
         const canvas = frames.view();
         for (0..canvas.height.raw()) |y| {
+            if (y % band_rows == 0) try io.checkCancel();
             const src = canvas.row(y);
             const dst = out.row(y);
             if (out.format == .rgba16) @memcpy(dst, src) else for (0..canvas.width.raw()) |x| {
@@ -239,10 +246,13 @@ pub const Decoder = struct {
     /// of a block are decoded as far as they reach before the input's end
     /// is reported, as Wuffs decodes what it holds first; after the end
     /// code, the remaining blocks are skipped.
-    fn decodePixels(d: *Decoder, place: *Placer, at: u64) ReadError!void {
+    fn decodePixels(d: *Decoder, io: Io, place: *Placer, at: u64) ReadError!void {
         const lzw = d.lzw.?;
         var block: [255]u8 = undefined;
         var given: aegis.units.Bytes(u64) = .fromRaw(0);
+        // Pixels decoded since the last cancel check.
+        var unchecked: usize = 0;
+        try io.checkCancel();
         var diagnostic: warp.lzw.Diagnostic = .{};
         lzw.options.diagnostic = &diagnostic;
         while (true) {
@@ -262,6 +272,11 @@ pub const Decoder = struct {
                 };
                 given = given.add(.fromRaw(step.out_len)) catch aegis.assert.never("a frame's bytes fit a u64");
                 try place.put(d, output[0..step.out_len], at);
+                unchecked += step.out_len;
+                if (unchecked >= band_bytes) {
+                    try io.checkCancel();
+                    unchecked = 0;
+                }
                 input = input[step.in_len..];
                 switch (step.status) {
                     .output_full => continue,
