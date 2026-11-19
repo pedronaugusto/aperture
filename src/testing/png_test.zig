@@ -146,6 +146,36 @@ test "an image past the pixel or memory limit is refused before its pixels are a
     ok.deinit();
 }
 
+test "pixel data past a band inflates whole into its rows, a cancel checked between bands" {
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const gpa = arena.allocator();
+    var prng: std.Random.DefaultPrng = .init(17);
+    // 640 rows of 640 RGBA pixels: about 1.6 MiB of filtered rows, two bands.
+    var image = try randomImage(gpa, prng.random(), .rgba8, 640, 640, 0);
+    const bytes = try encoded(gpa, image.view(), .{ .mode = .fast });
+    var whole = try decoded(testing.allocator, bytes, .rgba8, .{});
+    defer whole.deinit();
+    try testing.expectEqualSlices(u8, image.pixels, whole.pixels);
+    // A cancel at any check is the caller's, and the decode stops there.
+    var checks: u32 = 0;
+    while (true) : (checks += 1) {
+        const fio = try shakedown.FaultIo.init(testing.allocator, testing.io, .{ .plan = &.{.{
+            .at = .{ .nth = .{ .call = .checkCancel, .n = checks + 1 } },
+            .fault = .cancel,
+        }} });
+        defer fio.deinit();
+        var r: std.Io.Reader = .fixed(bytes);
+        if (aperture.decode(testing.allocator, fio.io(), &r, .rgba8, .{})) |back| {
+            var b = back;
+            b.deinit();
+            break;
+        } else |err| try testing.expectEqual(error.Canceled, err);
+    }
+    // One check before each band at least.
+    try testing.expect(checks >= 2);
+}
+
 test "decoding allocates nothing it does not free" {
     var prng: std.Random.DefaultPrng = .init(13);
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);

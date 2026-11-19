@@ -99,5 +99,7 @@ All notable changes to aperture are documented here. The format follows
 
 ### Changed
 
+- PNG's pixel data inflates through one path at every size: warp's `Inflate.Contiguous` writes into the buffer of the filtered rows, which is the stream's own history, a MiB at a time with a cancel checked before each, where pixel data of a MiB or less went through warp's whole-buffer decompressor with no cancel point inside it and more through the windowed streaming inflate, its 32 KiB window allocated and charged to the memory limit. No window is allocated or charged now.
+- Pins warp 2c40175, where it pinned 46a58d2: warp main, with `Inflate.Contiguous`.
 - Pins warp 46a58d2, where it pinned 0dcd202: warp main, the one warp a program on aperture
   and visor links (aegis f52eabe for both). Nothing aperture calls changed.

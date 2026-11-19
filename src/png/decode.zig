@@ -541,39 +541,20 @@ pub const Decoder = struct {
 
     /// `data`, one zlib stream, inflated into `out`; the bytes written. A
     /// stream longer than `out` is `Invalid`, one that ends early `Truncated`.
-    /// Pixel data of one band or less is inflated whole, `out` its own
-    /// history, `io` checked before it; more goes through the streaming
-    /// inflate a band at a time, `io` checked before each, its 32 KiB window
-    /// charged to the budget.
-    fn inflateBanded(d: *Decoder, io: Io, data: []const u8, out: []u8, expected: usize, at: u64) ReadError!usize {
-        try io.checkCancel();
-        if (expected <= band_bytes) {
-            var z: warp.Decompressor = .init;
-            const r = z.inflate(data, out, .{ .accept = .zlib }) catch |err| return switch (err) {
-                error.ChecksumMismatch => d.chunk.fail(error.Corrupt, .pixel_data, at),
-                error.Truncated => d.chunk.fail(error.Truncated, .pixel_data, at),
-                else => d.chunk.fail(error.Invalid, .pixel_data, at),
-            };
-            return r.out_len;
-        }
-        const options: warp.Inflate.Options = .{ .accept = .zlib };
-        try d.charge(options.windowLen());
-        const window = try d.gpa.alloc(u8, options.windowLen());
-        defer d.gpa.free(window);
-        var inflate = warp.Inflate.init(window, options) catch aegis.assert.never("a window of the options' length, which are valid");
+    /// `out` is the stream's own history (no window), inflated a band at a
+    /// time with `io` checked before each.
+    fn inflateBanded(d: *Decoder, io: Io, data: []const u8, out: []u8, at: u64) ReadError!usize {
+        var inflate = warp.Inflate.Contiguous.init(out, .{ .accept = .zlib }) catch aegis.assert.never("zlib with the default window, valid options");
         var in_at: usize = 0;
-        var out_at: usize = 0;
         while (true) {
             try io.checkCancel();
-            const end = @min(out.len, out_at + band_bytes);
-            const step = inflate.decode(data[in_at..], out[out_at..end]) catch |err| return d.inflateFailed(err, at);
+            const step = inflate.decode(data[in_at..], band_bytes) catch |err| return d.inflateFailed(err, at);
             in_at += step.in_len;
-            out_at += step.out_len;
             switch (step.status) {
-                .done => return out_at,
+                .done => return inflate.written().len,
                 // Every byte of the stream taken and it goes on.
                 .need_input => return d.chunk.fail(error.Truncated, .pixel_data, at),
-                .output_full => if (end == out.len) return d.chunk.fail(error.Invalid, .pixel_data, at),
+                .output_full => if (inflate.written().len == out.len) return d.chunk.fail(error.Invalid, .pixel_data, at),
                 .block_end, .member_end => {},
             }
         }
@@ -595,7 +576,7 @@ pub const Decoder = struct {
         try d.charge(expected + warp.inflate_margin);
         const rows = try d.gpa.alloc(u8, expected + warp.inflate_margin);
         defer d.gpa.free(rows);
-        const out_len = try d.inflateBanded(io, data, rows, expected, at);
+        const out_len = try d.inflateBanded(io, data, rows, at);
         if (out_len != expected) return d.chunk.fail(if (out_len < expected) error.Truncated else error.Invalid, .pixel_data, at);
 
         const native_format = d.native();

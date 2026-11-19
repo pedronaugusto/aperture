@@ -10,8 +10,8 @@
             .hash = "aegis-0.2.4-rsxouoquDQApwYDuGdd2YyEeTeNp6CnJoOZKdVCfc3jt",
         },
         .warp = .{
-            .url = "git+https://github.com/pedronaugusto/warp#46a58d2114119dcc7fd11909f0ec0132ab3452c8",
-            .hash = "warp-0.4.5-JASxFRUkMQB8ykX0LPgn4v7CQjDdgZu6XC2uB79kyTR7",
+            .url = "git+https://github.com/pedronaugusto/warp#2c401753e929e2ac5683aa2ba66b656169be6d9c",
+            .hash = "warp-0.4.5-JASxFdVOMQBoopMC8U6O0ZwY8hQJW6r7Iu1WGQkAlnDU",
         },
     },
     .dev_dependencies = .{
