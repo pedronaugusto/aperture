@@ -28,7 +28,7 @@ const gen = shakedown.gen;
 fn image(case: *Case, format: aperture.PixelFormat, w: u32, h: u32) !aperture.Image {
     const s = case.source;
     const stride = format.rowBytes(w);
-    const px = try case.gpa.alloc(u8, @as(usize, h) * stride.raw());
+    const px = try case.gpa.alloc(u8, (try stride.mul(h)).raw());
     var prng: std.Random.DefaultPrng = .init(gen.int(s, u64));
     const r = prng.random();
     switch (gen.intRange(s, u8, 0, 4)) {
@@ -139,7 +139,7 @@ fn roundTrip(_: void, case: *Case) !void {
     var y: u32 = 0;
     while (y < h) : (y += band) {
         const n = @min(band, h - y);
-        try e.writeRows(src.pixels[y * src.stride.raw() ..][0 .. n * src.stride.raw()], src.stride);
+        try e.writeRows(src.pixels[(try src.stride.mul(y)).raw()..][0..(try src.stride.mul(n)).raw()], src.stride);
     }
     var len = try e.finish();
     len.acknowledge("the bytes written are read back from the writer");
@@ -161,7 +161,7 @@ fn scalable(case: *Case, w: u32, h: u32) !aperture.Image {
 
 fn resized(case: *Case, src: aperture.View, w: u32, h: u32, options: aperture.ResizeOptions) !aperture.Image {
     const stride = src.format.rowBytes(w);
-    const px = try case.gpa.alloc(u8, @as(usize, h) * stride.raw());
+    const px = try case.gpa.alloc(u8, (try stride.mul(h)).raw());
     var out: aperture.Image = .{ .gpa = case.gpa, .width = try .init(w), .height = try .init(h), .format = src.format, .stride = stride, .pixels = px };
     try aperture.resize(testing.allocator, out.mutable(), src, options);
     return out;
@@ -427,7 +427,7 @@ fn animation(_: void, case: *Case) !void {
     var d: aperture.png.Decoder = try .init(testing.allocator, &r, .{});
     defer d.deinit();
     const stride = aperture.PixelFormat.rgba16.rowBytes(w);
-    const out_px = try case.gpa.alloc(u8, stride.raw() * h);
+    const out_px = try case.gpa.alloc(u8, (try stride.mul(h)).raw());
     const out: aperture.Mutable = .{ .width = try .init(w), .height = try .init(h), .format = .rgba16, .stride = stride, .pixels = out_px };
 
     // The model: the canvas before each frame, as the decoder left it, and

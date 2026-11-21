@@ -5,8 +5,10 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const aegis = @import("aegis");
 const pixel = @import("pixel.zig");
 const Image = @import("Image.zig");
+const Limits = @import("Limits.zig");
 
 pub const Filter = enum {
     /// The source pixel whose centre is nearest: no blending.
@@ -137,21 +139,20 @@ const Axis = struct {
 /// `src` scaled to `dst`'s size and written in `dst`'s format.
 pub fn resize(gpa: Allocator, dst: Image.Mutable, src: Image.View, options: Options) Error!void {
     if (dst.format == .indexed8) return error.Unsupported;
-    const sw = src.width.raw();
-    const sh = src.height.raw();
-    const dw = dst.width.raw();
-    const dh = dst.height.raw();
-    var xs = try Axis.init(gpa, sw, dw, options.filter);
+    var xs = try Axis.init(gpa, src.width.raw(), dst.width.raw(), options.filter);
     defer xs.deinit(gpa);
-    var ys = try Axis.init(gpa, sh, dh, options.filter);
+    var ys = try Axis.init(gpa, src.height.raw(), dst.height.raw(), options.filter);
     defer ys.deinit(gpa);
+    // The destination's columns: one set of weights each.
+    const dw = xs.count.len;
 
     // Each source row read once, resampled across, kept for the columns.
-    const across = try gpa.alloc([4]f32, @as(usize, sh) * dw);
+    const kept = aegis.units.Count(Limits.Pixel, u64).fromRaw(src.height.raw()).mul(dw) catch return error.OutOfMemory;
+    const across = try gpa.alloc([4]f32, (kept.convert(usize) catch return error.OutOfMemory).raw());
     defer gpa.free(across);
-    const line = try gpa.alloc([4]f32, sw);
+    const line = try gpa.alloc([4]f32, src.width.raw());
     defer gpa.free(line);
-    for (0..sh) |y| {
+    for (0..src.height.raw()) |y| {
         const row = src.row(y);
         for (line, 0..) |*p, x| p.* = load(pixel.get(src.format, row, x, src.palette), options.linear);
         const out = across[y * dw ..][0..dw];
@@ -162,7 +163,7 @@ pub fn resize(gpa: Allocator, dst: Image.Mutable, src: Image.View, options: Opti
             o.* = acc;
         }
     }
-    for (0..dh) |y| {
+    for (0..ys.count.len) |y| {
         const w = ys.weights[y * ys.stride ..][0..ys.count[y]];
         const out = dst.row(y);
         for (0..dw) |x| {

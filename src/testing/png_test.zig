@@ -14,7 +14,7 @@ const aegis = @import("aegis");
 /// format holds (gray where gray, opaque where no alpha).
 fn randomImage(gpa: std.mem.Allocator, r: std.Random, format: aperture.PixelFormat, w: u32, h: u32, kind: u2) !aperture.Image {
     const stride = format.rowBytes(w);
-    const pixels = try gpa.alloc(u8, @as(usize, h) * stride.raw());
+    const pixels = try gpa.alloc(u8, (try stride.mul(h)).raw());
     switch (kind) {
         0 => r.bytes(pixels),
         // Flat areas and runs, where reduction and filters matter.

@@ -257,8 +257,9 @@ fn map(gpa: Allocator, src: Image.View, dst: Image.Mutable, centres: []const [4]
 /// mapped, 7/16 ahead, 3/16, 5/16 and 1/16 on the next row; rows run in
 /// alternate directions.
 fn diffuse(gpa: Allocator, src: Image.View, dst: Image.Mutable, centres: []const [4]f32) Error!void {
-    const w = src.width.raw();
-    const err = try gpa.alloc([4]f32, 2 * (@as(usize, w) + 2));
+    // The columns, as the indexed8 rows hold them: a byte a pixel.
+    const w = dst.row(0).len;
+    const err = try gpa.alloc([4]f32, 2 * (w + 2));
     defer gpa.free(err);
     @memset(err, @splat(0));
     var this = err[0 .. w + 2];

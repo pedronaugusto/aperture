@@ -104,16 +104,23 @@ const Resize = struct {
     filter: aperture.ResizeFilter,
     dst: []u8 = &.{},
 
+    /// The image halved each way, the size the resize writes.
+    fn half(c: *const Resize) Error!struct { aperture.Dimension, aperture.Dimension } {
+        const w = c.image.width.div(2) catch return error.WrongOutput;
+        const h = c.image.height.div(2) catch return error.WrongOutput;
+        return .{ w, h };
+    }
     fn setup(c: *Resize) Error!void {
-        c.dst = try c.gpa.alloc(u8, (c.image.width.raw() / 2) * (c.image.height.raw() / 2) * 4);
+        const w, const h = try c.half();
+        const size = aperture.PixelFormat.rgba8.rowBytes(w.raw()).mul(h.raw()) catch return error.WrongOutput;
+        c.dst = try c.gpa.alloc(u8, size.raw());
     }
     fn teardown(c: *Resize) Error!void {
         c.gpa.free(c.dst);
     }
     fn run(c: *Resize, units: u64) Error!void {
-        const w = c.image.width.raw() / 2;
-        const h = c.image.height.raw() / 2;
-        const out: aperture.Mutable = .{ .width = aperture.Dimension.init(w) catch return error.WrongOutput, .height = aperture.Dimension.init(h) catch return error.WrongOutput, .format = .rgba8, .stride = .fromRaw(w * 4), .pixels = c.dst };
+        const w, const h = try c.half();
+        const out: aperture.Mutable = .{ .width = w, .height = h, .format = .rgba8, .stride = aperture.PixelFormat.rgba8.rowBytes(w.raw()), .pixels = c.dst };
         for (0..units) |_| try aperture.resize(c.gpa, out, c.image, .{ .filter = c.filter });
     }
 };

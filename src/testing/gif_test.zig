@@ -8,6 +8,7 @@
 const std = @import("std");
 const testing = std.testing;
 const aperture = @import("../aperture.zig");
+const extent = @import("../extent.zig");
 const shakedown = @import("shakedown");
 
 const corpus = @embedFile("gif.corpus");
@@ -63,7 +64,7 @@ fn check(gpa: std.mem.Allocator, name: []const u8, file: []const u8, verdict: []
     try testing.expectEqual(h, d.info().height.raw());
 
     const stride = aperture.PixelFormat.rgba8.rowBytes(w);
-    const px = try gpa.alloc(u8, stride.raw() * h);
+    const px = try gpa.alloc(u8, (try stride.mul(h)).raw());
     defer gpa.free(px);
     const out: aperture.Mutable = .{ .width = d.info().width, .height = d.info().height, .format = .rgba8, .stride = stride, .pixels = px };
     var index: usize = 0;
@@ -212,7 +213,7 @@ fn anyBytes(files: []const []const u8, case: *shakedown.Case) !void {
     defer d.deinit();
     const info = d.info();
     const stride = aperture.PixelFormat.rgba8.rowBytes(info.width.raw());
-    const px = try case.gpa.alloc(u8, stride.raw() * info.height.raw());
+    const px = try case.gpa.alloc(u8, (try stride.mul(info.height.raw())).raw());
     const out: aperture.Mutable = .{ .width = info.width, .height = info.height, .format = .rgba8, .stride = stride, .pixels = px };
     while (true) {
         const next = d.nextFrame(testing.io, out) catch |err| switch (err) {
@@ -220,8 +221,8 @@ fn anyBytes(files: []const []const u8, case: *shakedown.Case) !void {
             else => return err,
         };
         const frame = next orelse return;
-        try testing.expect(frame.rect.x + frame.rect.width <= info.width.raw());
-        try testing.expect(frame.rect.y + frame.rect.height <= info.height.raw());
+        try testing.expect(extent.within(@as(u64, frame.rect.x) + frame.rect.width, info.width));
+        try testing.expect(extent.within(@as(u64, frame.rect.y) + frame.rect.height, info.height));
     }
 }
 

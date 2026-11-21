@@ -548,17 +548,19 @@ pub const Decoder = struct {
     /// The IDCT of every block, each component brought to the image's size,
     /// and the colour conversion: libjpeg-turbo's samples.
     fn render(d: *Decoder, io: Io) ReadError![]u8 {
-        const w: usize = d.width.raw();
-        const h: usize = d.height.raw();
         const nc: usize = d.count;
+        // A component's samples at the image's size: a byte a pixel, a row of them `line`.
+        const line = pixel.PixelFormat.gray8.rowBytes(d.width.raw());
+        const area = line.mul(d.height.raw()) catch return d.src.fail(error.TooLarge, .limit, 0);
         var full: [4][]u8 = undefined;
         var made: usize = 0;
         defer for (full[0..made]) |f| d.gpa.free(f);
         const smoothed = d.smoothing();
         for (d.components[0..d.count], 0..) |*c, ci| {
             const stride: usize = @as(usize, c.blocks_w) * 8;
-            try d.charge(stride * c.blocks_h * 8 + w * h);
-            const plane = try d.gpa.alloc(u8, stride * c.blocks_h * 8);
+            const blocks = aegis.units.Bytes(usize).fromRaw(stride * c.blocks_h * 8);
+            try d.charge((blocks.add(area) catch return d.src.fail(error.TooLarge, .limit, 0)).raw());
+            const plane = try d.gpa.alloc(u8, blocks.raw());
             defer d.gpa.free(plane);
             const none: [64]u16 = @splat(0);
             const quant = &(c.quant orelse none);
@@ -573,30 +575,40 @@ pub const Decoder = struct {
                     idct.islow(&estimated, quant, out, stride);
                 } else idct.islow(b, quant, out, stride);
             };
-            full[ci] = try d.gpa.alloc(u8, w * h);
+            full[ci] = try d.gpa.alloc(u8, area.raw());
             made += 1;
-            colour.upsample(.{ .samples = plane, .stride = stride, .width = c.dw, .height = c.dh, .h = c.h, .v = c.v }, d.hmax, d.vmax, w, h, full[ci]) catch return d.src.fail(error.Unsupported, .jpeg_components, 0);
+            colour.upsample(.{ .samples = plane, .stride = stride, .width = c.dw, .height = c.dh, .h = c.h, .v = c.v }, d.hmax, d.vmax, d.width.raw(), d.height.raw(), full[ci]) catch return d.src.fail(error.Unsupported, .jpeg_components, 0);
         }
-        try d.charge(w * h * nc);
-        const out = try d.gpa.alloc(u8, w * h * nc);
+        const out_line = line.mul(nc) catch return d.src.fail(error.TooLarge, .limit, 0);
+        const size = area.mul(nc) catch return d.src.fail(error.TooLarge, .limit, 0);
+        try d.charge(size.raw());
+        const out = try d.gpa.alloc(u8, size.raw());
         errdefer d.gpa.free(out);
         const m = d.model();
-        for (0..w * h) |p| {
-            if (p % (band_rows * w) == 0) try io.checkCancel();
-            const o = out[p * nc ..][0..nc];
-            switch (m.kind) {
-                .gray => o[0] = full[0][p],
-                .rgb => for (0..3) |k| {
-                    o[k] = full[k][p];
-                },
-                .ycbcr => o[0..3].* = colour.rgb(full[0][p], full[1][p], full[2][p]),
-                .cmyk => for (0..4) |k| {
-                    o[k] = full[k][p];
-                },
-                .ycck => {
-                    o[0..3].* = colour.cmy(full[0][p], full[1][p], full[2][p]);
-                    o[3] = full[3][p];
-                },
+        for (0..d.height.raw()) |y| {
+            if (y % band_rows == 0) try io.checkCancel();
+            const from = line.mul(y) catch aegis.assert.never("a row of the image starts within its planes");
+            const to = out_line.mul(y) catch aegis.assert.never("a row of the image starts within its samples");
+            // Row `y` of each component's plane, and of the samples.
+            var rows: [4][]const u8 = undefined;
+            for (full[0..nc], rows[0..nc]) |f, *r| r.* = f[from.raw()..][0..line.raw()];
+            const written = out[to.raw()..][0..out_line.raw()];
+            for (0..line.raw()) |x| {
+                const o = written[x * nc ..][0..nc];
+                switch (m.kind) {
+                    .gray => o[0] = rows[0][x],
+                    .rgb => for (0..3) |k| {
+                        o[k] = rows[k][x];
+                    },
+                    .ycbcr => o[0..3].* = colour.rgb(rows[0][x], rows[1][x], rows[2][x]),
+                    .cmyk => for (0..4) |k| {
+                        o[k] = rows[k][x];
+                    },
+                    .ycck => {
+                        o[0..3].* = colour.cmy(rows[0][x], rows[1][x], rows[2][x]);
+                        o[3] = rows[3][x];
+                    },
+                }
             }
         }
         d.samples_out = out;
@@ -648,21 +660,23 @@ pub const Decoder = struct {
     pub fn decode(d: *Decoder, io: Io, want: pixel.PixelFormat) ReadError!Image {
         if (want == .indexed8) return error.Unsupported;
         const s = try d.samples(io);
-        const w = d.width.raw();
-        const h = d.height.raw();
-        const stride = want.rowBytes(w);
-        const size = stride.mul(h) catch return d.src.fail(error.TooLarge, .limit, 0);
+        const stride = want.rowBytes(d.width.raw());
+        const size = stride.mul(d.height.raw()) catch return d.src.fail(error.TooLarge, .limit, 0);
         try d.charge(size.raw());
         const px = try d.gpa.alloc(u8, size.raw());
         errdefer d.gpa.free(px);
         var image: Image = .{ .gpa = d.gpa, .width = d.width, .height = d.height, .format = want, .stride = stride, .pixels = px };
         const m = d.model();
         const nc: usize = s.components;
-        for (0..h) |y| {
+        // A row of the samples: `nc` bytes a pixel.
+        const line = pixel.PixelFormat.gray8.rowBytes(d.width.raw()).mul(nc) catch return d.src.fail(error.TooLarge, .limit, 0);
+        for (0..d.height.raw()) |y| {
             if (y % band_rows == 0) try io.checkCancel();
             const row = image.mutable().row(y);
-            for (0..w) |x| {
-                const p = s.data[(y * w + x) * nc ..][0..nc];
+            const from = line.mul(y) catch aegis.assert.never("a row of the image starts within its samples");
+            const stored = s.data[from.raw()..][0..line.raw()];
+            for (0..d.width.raw()) |x| {
+                const p = stored[x * nc ..][0..nc];
                 const c: [3]u8 = switch (nc) {
                     1 => .{ p[0], p[0], p[0] },
                     3 => p[0..3].*,

@@ -19,6 +19,7 @@ const aegis = @import("aegis");
 const warp = @import("warp");
 const pixel = @import("../pixel.zig");
 const Image = @import("../Image.zig");
+const extent = @import("../extent.zig");
 const Info = @import("../Info.zig");
 const Limits = @import("../Limits.zig");
 const Diagnostic = @import("../Diagnostic.zig");
@@ -442,8 +443,6 @@ pub const Placer = struct {
     pass: u3,
 
     fn put(p: *Placer, d: *const Decoder, indices: []const u8, at: u64) ReadError!void {
-        const w = p.frames.width.raw();
-        const h = p.frames.height.raw();
         var i: usize = 0;
         while (i < indices.len) {
             if (p.y >= p.desc.y1) return d.fail(error.Invalid, .pixel_data, at);
@@ -454,7 +453,7 @@ pub const Placer = struct {
             }
             const c = p.colours[indices[i]];
             i += 1;
-            if (c[3] != 0 and p.x < w and p.y < h) {
+            if (c[3] != 0 and extent.within(@as(u64, p.x) + 1, p.frames.width) and extent.within(@as(u64, p.y) + 1, p.frames.height)) {
                 pixel.put(.rgba16, p.frames.row(p.y), p.x, .{ pixel.widen(c[0]), pixel.widen(c[1]), pixel.widen(c[2]), 65535 });
             }
             p.x += 1;

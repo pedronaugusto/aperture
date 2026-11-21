@@ -22,6 +22,7 @@ const Allocator = std.mem.Allocator;
 const aegis = @import("aegis");
 const pixel = @import("../pixel.zig");
 const Image = @import("../Image.zig");
+const extent = @import("../extent.zig");
 const Info = @import("../Info.zig");
 const Limits = @import("../Limits.zig");
 const Diagnostic = @import("../Diagnostic.zig");
@@ -177,17 +178,17 @@ pub const Decoder = struct {
         aegis.assert.invariant(out.width.eql(d.width) and out.height.eql(d.height), "a frame is written at the canvas's size");
         if (out.format == .indexed8) return error.Unsupported;
         if (d.still) |c| return d.stillFrame(io, c, out);
-        const w = d.width.raw();
-        const h = d.height.raw();
         const a = &d.animation.?;
         if (a.next == a.demuxed.frames.len) return null;
         const f = a.demuxed.frames[a.next];
-        const canvas_pixels = aegis.units.Count(Limits.Pixel, u64).fromRaw(w).mul(h) catch aegis.assert.never("2^24 by 2^24 pixels fit a u64");
+        const canvas_pixels = aegis.units.Count(Limits.Pixel, u64).fromRaw(d.width.raw()).mul(d.height.raw()) catch aegis.assert.never("2^24 by 2^24 pixels fit a u64");
         d.work.consume(canvas_pixels.raw()) catch return fail(d.options, error.TooLarge, .limit, f.start);
         if (a.frames == null) {
             try d.charge(Frames.memory(d.width, d.height).raw());
-            try d.charge(@as(usize, w) * h * 4);
-            a.scratch = try d.gpa.alloc(u8, @as(usize, w) * h * 4);
+            // The frame's own pixels, at most the canvas's, as rgba8.
+            const scratch = pixel.PixelFormat.rgba8.rowBytes(d.width.raw()).mul(d.height.raw()) catch return error.TooLarge;
+            try d.charge(scratch.raw());
+            a.scratch = try d.gpa.alloc(u8, scratch.raw());
             a.frames = Frames.init(d.gpa, d.width, d.height) catch |err| {
                 d.gpa.free(a.scratch);
                 a.scratch = &.{};
@@ -204,8 +205,8 @@ pub const Decoder = struct {
 
         const rect: Frames.Rect = .{ .x = f.x, .y = f.y, .width = f.width, .height = f.height };
         const first = a.next == 0;
-        const key = first or ((!f.has_alpha or !f.blend) and f.width == w and f.height == h) or
-            if (a.last) |l| l.background and ((l.rect.width == w and l.rect.height == h) or l.key) else false;
+        const key = first or ((!f.has_alpha or !f.blend) and extent.equals(f.width, d.width) and extent.equals(f.height, d.height)) or
+            if (a.last) |l| l.background and ((extent.equals(l.rect.width, d.width) and extent.equals(l.rect.height, d.height)) or l.key) else false;
         const frames = &a.frames.?;
         frames.begin(rect, if (f.dispose_background) .background else .none, first);
         if (key) frames.clear();
@@ -223,11 +224,11 @@ pub const Decoder = struct {
         a.last = .{ .rect = rect, .background = f.dispose_background, .key = key };
         a.next += 1;
         const canvas = frames.view();
-        for (0..h) |y| {
+        for (0..d.height.raw()) |y| {
             if (y % band_rows == 0) try io.checkCancel();
             const src = canvas.row(y);
             const dst = out.row(y);
-            if (out.format == .rgba16) @memcpy(dst, src) else for (0..w) |x| {
+            if (out.format == .rgba16) @memcpy(dst, src) else for (0..d.width.raw()) |x| {
                 pixel.put(out.format, dst, x, pixel.get(.rgba16, src, x, null));
             }
         }

@@ -9,6 +9,7 @@
 const std = @import("std");
 const testing = std.testing;
 const aperture = @import("../aperture.zig");
+const extent = @import("../extent.zig");
 const shakedown = @import("shakedown");
 
 const corpus = @embedFile("webp.corpus");
@@ -56,7 +57,7 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
     const decoded = try std.fmt.parseInt(u32, f.next().?, 10);
     const refused_at = f.next().?;
     const info = d.info();
-    if (info.width.raw() != w or info.height.raw() != h) {
+    if (!extent.equals(w, info.width) or !extent.equals(h, info.height)) {
         std.debug.print("{s}: {d}x{d}, libwebp's {d}x{d}\n", .{ name, info.width.raw(), info.height.raw(), w, h });
         return .differs;
     }
@@ -82,7 +83,7 @@ fn check(name: []const u8, file: []const u8, verdict: []const u8) !Outcome {
         return .differs;
     }
     const stride = aperture.PixelFormat.rgba8.rowBytes(w);
-    const px = try testing.allocator.alloc(u8, stride.raw() * h);
+    const px = try testing.allocator.alloc(u8, (try stride.mul(h)).raw());
     defer testing.allocator.free(px);
     const out: aperture.Mutable = .{ .width = info.width, .height = info.height, .format = .rgba8, .stride = stride, .pixels = px };
     var time: u64 = 0;
@@ -173,7 +174,8 @@ fn anyBytes(all: []const [3][]const u8, case: *shakedown.Case) !void {
     defer d.deinit();
     const info = d.info();
     const stride = aperture.PixelFormat.rgba8.rowBytes(info.width.raw());
-    if (stride.raw() * info.height.raw() > limits.memory.raw()) {
+    const canvas = try stride.mul(info.height.raw());
+    if (canvas.compare(limits.memory) == .gt) {
         // Past the memory limit: the decoder's own canvas is refused.
         var image = d.decode(testing.io, .rgba8) catch |err| switch (err) {
             error.TooLarge => return,
@@ -182,7 +184,7 @@ fn anyBytes(all: []const [3][]const u8, case: *shakedown.Case) !void {
         image.deinit();
         return error.TestUnexpectedResult;
     }
-    const px = try case.gpa.alloc(u8, stride.raw() * info.height.raw());
+    const px = try case.gpa.alloc(u8, canvas.raw());
     const out: aperture.Mutable = .{ .width = info.width, .height = info.height, .format = .rgba8, .stride = stride, .pixels = px };
     while (d.nextFrame(testing.io, out) catch |err| switch (err) {
         error.Invalid, error.TooLarge => return,
@@ -252,7 +254,7 @@ fn stills(gpa: std.mem.Allocator, all: []const [3][]const u8) ![]Still {
         var d = try aperture.webp.Decoder.init(gpa, &r, .{});
         defer d.deinit();
         const info = d.info();
-        if (info.width.raw() > 24 or info.height.raw() > 24) continue;
+        if (info.width.compare(.literal(24)) == .gt or info.height.compare(.literal(24)) == .gt) continue;
         const image = try d.decode(testing.io, .rgba8);
         var opaque_ = true;
         for (0..image.pixels.len / 4) |i| opaque_ = opaque_ and image.pixels[4 * i + 3] == 255;
@@ -323,7 +325,7 @@ fn wrapped(all: []const Still, case: *shakedown.Case) !void {
     defer d.deinit();
     try testing.expectEqual(@as(?u32, @intCast(count)), d.info().frames);
     const stride = aperture.PixelFormat.rgba8.rowBytes(cw);
-    const px = try gpa.alloc(u8, stride.raw() * ch);
+    const px = try gpa.alloc(u8, (try stride.mul(ch)).raw());
     const model = try gpa.alloc(u8, px.len);
     @memset(model, 0);
     const out: aperture.Mutable = .{ .width = d.info().width, .height = d.info().height, .format = .rgba8, .stride = stride, .pixels = px };

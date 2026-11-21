@@ -17,6 +17,7 @@
 //! colour, alpha dropped; 16-bit samples narrowed to 8.
 
 const std = @import("std");
+const aegis = @import("aegis");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const pixel = @import("../pixel.zig");
@@ -66,9 +67,11 @@ pub const Component = struct {
 
 /// Write `image` as a JPEG.
 pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Options) Error!void {
-    const w = image.width.raw();
-    const h = image.height.raw();
-    if (w > 65535 or h > 65535) return error.TooLarge;
+    // The sides as the frame header holds them, 16 bits each.
+    const side_w = aegis.int.cast(u16, image.width.raw()) catch return error.TooLarge;
+    const side_h = aegis.int.cast(u16, image.height.raw()) catch return error.TooLarge;
+    const w: u32 = side_w;
+    const h: u32 = side_h;
     const gray = switch (image.format) {
         .gray8, .gray16, .graya8, .graya16 => true,
         else => false,
@@ -118,8 +121,8 @@ pub fn encode(gpa: Allocator, writer: *Io.Writer, image: Image.View, options: Op
     try writer.writeAll(&.{ 0xff, if (options.progressive) 0xc2 else 0xc0 });
     try writer.writeInt(u16, @intCast(8 + 3 * comps.len), .big);
     try writer.writeByte(8);
-    try writer.writeInt(u16, @intCast(h), .big);
-    try writer.writeInt(u16, @intCast(w), .big);
+    try writer.writeInt(u16, side_h, .big);
+    try writer.writeInt(u16, side_w, .big);
     try writer.writeByte(@intCast(comps.len));
     for (comps) |c| try writer.writeAll(&.{ c.id, (c.h << 4) | c.v, c.table });
     if (options.progressive) {
@@ -383,18 +386,22 @@ const Coder = struct {
 
 /// The image's samples as full-resolution planes, one after another: gray,
 /// or Y, Cb and Cr as jccolor.c's tables make them.
-fn colour(gpa: Allocator, image: Image.View, n: usize) Allocator.Error![]u8 {
-    const w = image.width.raw();
-    const h = image.height.raw();
-    const size = @as(usize, w) * h;
-    const out = try gpa.alloc(u8, size * n);
-    for (0..h) |y| {
+fn colour(gpa: Allocator, image: Image.View, n: usize) Error![]u8 {
+    // A plane's row: a byte a pixel.
+    const line = pixel.PixelFormat.gray8.rowBytes(image.width.raw());
+    const size = line.mul(image.height.raw()) catch return error.TooLarge;
+    const out = try gpa.alloc(u8, (size.mul(n) catch return error.TooLarge).raw());
+    var planes: [3][]u8 = undefined;
+    for (planes[0..n], 0..) |*plane, k| plane.* = out[(size.mul(k) catch aegis.assert.never("a plane starts within the planes")).raw()..][0..size.raw()];
+    for (0..image.height.raw()) |y| {
         const row = image.row(y);
-        for (0..w) |x| {
+        const from = line.mul(y) catch aegis.assert.never("a row starts within its plane");
+        var rows: [3][]u8 = undefined;
+        for (planes[0..n], rows[0..n]) |plane, *r| r.* = plane[from.raw()..][0..line.raw()];
+        for (0..image.width.raw()) |x| {
             const p = pixel.get(image.format, row, x, image.palette);
-            const at = y * w + x;
             if (n == 1) {
-                out[at] = pixel.narrow(p[0]);
+                rows[0][x] = pixel.narrow(p[0]);
                 continue;
             }
             const r: i64 = pixel.narrow(p[0]);
@@ -402,9 +409,9 @@ fn colour(gpa: Allocator, image: Image.View, n: usize) Allocator.Error![]u8 {
             const b: i64 = pixel.narrow(p[2]);
             const half = 1 << 15;
             const offset = (128 << 16) + half - 1;
-            out[at] = @intCast((19595 * r + 38470 * g + 7471 * b + half) >> 16);
-            out[size + at] = @intCast((-11059 * r - 21709 * g + 32768 * b + offset) >> 16);
-            out[2 * size + at] = @intCast((32768 * r - 27439 * g - 5329 * b + offset) >> 16);
+            rows[0][x] = @intCast((19595 * r + 38470 * g + 7471 * b + half) >> 16);
+            rows[1][x] = @intCast((-11059 * r - 21709 * g + 32768 * b + offset) >> 16);
+            rows[2][x] = @intCast((32768 * r - 27439 * g - 5329 * b + offset) >> 16);
         }
     }
     return out;

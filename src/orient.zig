@@ -1,6 +1,7 @@
 //! EXIF orientation applied: the stored pixels turned and mirrored to the
 //! way the image is meant to be seen.
 
+const aegis = @import("aegis");
 const Image = @import("Image.zig");
 const Info = @import("Info.zig");
 
@@ -27,25 +28,38 @@ pub fn orient(dst: Image.Mutable, src: Image.View, orientation: Info.Orientation
     const want_h = if (swap) src.width else src.height;
     if (!dst.width.eql(want_w) or !dst.height.eql(want_h) or dst.format != src.format) return error.SizeMismatch;
     const n = src.format.bytes();
-    const w = src.width.raw();
-    const h = src.height.raw();
-    for (0..h) |y| {
+    for (0..src.height.raw()) |y| {
         const s = src.row(y);
-        for (0..w) |x| {
-            // Where pixel (x, y) lands, by EXIF's eight cases.
-            const to: [2]usize = switch (orientation) {
-                .normal => .{ x, y },
-                .mirror_horizontal => .{ w - 1 - x, y },
-                .rotate_180 => .{ w - 1 - x, h - 1 - y },
-                .mirror_vertical => .{ x, h - 1 - y },
-                .transpose => .{ y, x },
-                .rotate_90 => .{ h - 1 - y, x },
-                .transverse => .{ h - 1 - y, w - 1 - x },
-                .rotate_270 => .{ y, w - 1 - x },
+        for (0..src.width.raw()) |x| {
+            // Where pixel (x, y) lands, by EXIF's eight cases: a mirrored
+            // position is counted from the end of the row or of the image.
+            const to: []u8 = switch (orientation) {
+                .normal => dst.row(y)[x * n ..][0..n],
+                .mirror_horizontal => fromEnd(dst.row(y), x, n),
+                .rotate_180 => fromEnd(rowFromEnd(dst, y), x, n),
+                .mirror_vertical => rowFromEnd(dst, y)[x * n ..][0..n],
+                .transpose => dst.row(x)[y * n ..][0..n],
+                .rotate_90 => fromEnd(dst.row(x), y, n),
+                .transverse => fromEnd(rowFromEnd(dst, x), y, n),
+                .rotate_270 => rowFromEnd(dst, x)[y * n ..][0..n],
             };
-            @memcpy(dst.row(to[1])[to[0] * n ..][0..n], s[x * n ..][0..n]);
+            @memcpy(to, s[x * n ..][0..n]);
         }
     }
+}
+
+/// Pixel `k` of `row` counted from its last, `n` bytes each.
+fn fromEnd(row: []u8, k: usize, n: usize) []u8 {
+    return row[row.len - (k + 1) * n ..][0..n];
+}
+
+/// Row `k` of `m` counted from its last: its start that many strides back
+/// from the end of the image's span.
+fn rowFromEnd(m: Image.Mutable, k: usize) []u8 {
+    const span = m.stride.mul(m.height.raw()) catch aegis.assert.never("the image's rows, a stride each, span no more than a usize");
+    const back = m.stride.mul(k + 1) catch aegis.assert.never("a row of the image lies within its span");
+    const start = span.sub(back) catch aegis.assert.never("row k from the last is a row of the image");
+    return m.pixels[start.raw()..][0..m.format.rowBytes(m.width.raw()).raw()];
 }
 
 test "the eight orientations: a quarter turn right moves the top-left pixel to the top-right" {

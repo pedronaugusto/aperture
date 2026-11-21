@@ -12,6 +12,7 @@ const Allocator = std.mem.Allocator;
 const aegis = @import("aegis");
 const pixel = @import("pixel.zig");
 const Image = @import("Image.zig");
+const extent = @import("extent.zig");
 
 pub const Dispose = enum(u8) {
     /// The canvas is left as the frame drew it.
@@ -103,9 +104,7 @@ pub fn holds(f: *const Frames, rect: Rect) bool {
 
 /// Whether `rect` lies within the canvas, empty or not.
 pub fn within(f: *const Frames, rect: Rect) bool {
-    const w: u64 = f.width.raw();
-    const h: u64 = f.height.raw();
-    return @as(u64, rect.x) + rect.width <= w and @as(u64, rect.y) + rect.height <= h;
+    return extent.within(@as(u64, rect.x) + rect.width, f.width) and extent.within(@as(u64, rect.y) + rect.height, f.height);
 }
 
 /// Start a frame: the last frame's disposal applied, and `rect` (within

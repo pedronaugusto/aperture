@@ -311,8 +311,8 @@ pub const Decoder = struct {
     /// profile, inflated within `Limits.metadata`.
     fn readProfile(d: *Decoder, c: chunks.Header) InitError!void {
         if (d.icc != null) return d.chunk.fail(error.Invalid, .png_chunk_order, d.chunk.chunkStart());
-        const budget = d.options.limits.metadata.raw();
-        if (c.len > budget) return d.chunk.fail(error.TooLarge, .limit, d.chunk.chunkStart());
+        const budget = d.options.limits.metadata;
+        if (aegis.units.Bytes(u32).fromRaw(c.len).compare(budget) == .gt) return d.chunk.fail(error.TooLarge, .limit, d.chunk.chunkStart());
         try d.charge(c.len);
         const raw = try d.gpa.alloc(u8, c.len);
         defer d.gpa.free(raw);
@@ -322,16 +322,19 @@ pub const Decoder = struct {
         if (name_end == 0 or name_end + 2 > raw.len or raw[name_end + 1] != 0) return d.chunk.fail(error.Invalid, .png_chunk_length, d.chunk.chunkStart());
         // Room for four times the compressed profile, doubled while the
         // stream needs more, up to the metadata limit.
-        var room: usize = @min(budget, @max(4096, 4 * raw.len));
+        const most = budget.convert(usize);
+        const first: aegis.units.Bytes(usize) = .fromRaw(@max(4096, 4 * raw.len));
+        var room = if (first.compare(most) == .lt) first else most;
         while (true) {
-            try d.charge(room);
-            const out = try d.gpa.alloc(u8, room);
+            try d.charge(room.raw());
+            const out = try d.gpa.alloc(u8, room.raw());
             var z: warp.Decompressor = .init;
             const r = z.inflate(raw[name_end + 2 ..], out, .{ .accept = .zlib }) catch |err| {
                 d.gpa.free(out);
                 switch (err) {
-                    error.OutputTooSmall => if (room < budget) {
-                        room = @min(budget, room * 2);
+                    error.OutputTooSmall => if (room.compare(most) == .lt) {
+                        const doubled = room.mul(2) catch most;
+                        room = if (doubled.compare(most) == .lt) doubled else most;
                         continue;
                     } else return d.chunk.fail(error.TooLarge, .limit, d.chunk.chunkStart()),
                     error.ChecksumMismatch => return d.chunk.fail(error.Corrupt, .pixel_data, d.chunk.chunkStart()),
@@ -446,12 +449,15 @@ pub const Decoder = struct {
         d.default_read = true;
         d.first_idat_start = d.chunk.chunkStart();
         const rb = d.header.rowBytes(d.header.width.raw());
-        const native_row = d.native().rowBytes(d.header.width.raw()).raw();
         const options: warp.Inflate.Options = .{ .accept = .zlib };
-        try d.charge(options.windowLen() + 2 * (1 + rb) + native_row + RowStream.input_len);
+        // The prior and current filtered rows, each with its filter byte, and a row in the native format.
+        const filtered: aegis.units.Bytes(usize) = .fromRaw(2 * (1 + rb));
+        const rows = filtered.add(d.native().rowBytes(d.header.width.raw())) catch return d.chunk.fail(error.TooLarge, .limit, d.chunk.chunkStart());
+        const reading: aegis.units.Bytes(usize) = .fromRaw(options.windowLen() + RowStream.input_len);
+        try d.charge((rows.add(reading) catch return d.chunk.fail(error.TooLarge, .limit, d.chunk.chunkStart())).raw());
         const window = try d.gpa.alloc(u8, options.windowLen());
         errdefer d.gpa.free(window);
-        const buf = try d.gpa.alloc(u8, 2 * (1 + rb) + native_row);
+        const buf = try d.gpa.alloc(u8, rows.raw());
         errdefer d.gpa.free(buf);
         @memset(buf, 0);
         const inflate = warp.Inflate.init(window, options) catch aegis.assert.never("a window of the options' length, which are valid");

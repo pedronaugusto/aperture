@@ -128,4 +128,5 @@ test {
     _ = convert_;
     _ = orient_;
     _ = @import("exif.zig");
+    _ = @import("extent.zig");
 }
