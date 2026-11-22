@@ -5,15 +5,6 @@ All notable changes to aperture are documented here. The format follows
 
 ## [Unreleased]
 
-### Breaking
-
-- Decoding is cancelable: the calls that decode pixels take the call's `Io` and check it once
-  per band of rows, returning `error.Canceled` with what they allocated freed. `png`, `gif`,
-  `jpeg` and `webp` `Decoder.decode(io, want)`, `nextFrame(io, out)`, `png.Decoder.readRows(io,
-  out, stride, want)` and `jpeg.Decoder.samples(io)` take it where they took none, and each
-  `ReadError` (so `DecodeError`) gains `Canceled`. `Decoder.init` reads only the header and
-  takes no `Io` (it took one it did not use). The one-shot `decode` uses the `Io` it took.
-
 ### Added
 
 - PNG decoding (`png.Decoder`, `decode`): every colour type and bit depth, Adam7, palette and
@@ -99,7 +90,18 @@ All notable changes to aperture are documented here. The format follows
 
 ### Changed
 
+- Decoding is cancelable: the calls that decode pixels take the call's `Io` and check it once
+  per band of rows, returning `error.Canceled` with what they allocated freed. `png`, `gif`,
+  `jpeg` and `webp` `Decoder.decode(io, want)`, `nextFrame(io, out)`, `png.Decoder.readRows(io,
+  out, stride, want)` and `jpeg.Decoder.samples(io)` take it where they took none, and each
+  `ReadError` (so `DecodeError`) gains `Canceled`. `Decoder.init` reads only the header and
+  takes no `Io` (it took one it did not use). The one-shot `decode` uses the `Io` it took.
 - PNG's pixel data inflates through one path at every size: warp's `Inflate.Contiguous` writes into the buffer of the filtered rows, which is the stream's own history, a MiB at a time with a cancel checked before each, where pixel data of a MiB or less went through warp's whole-buffer decompressor with no cancel point inside it and more through the windowed streaming inflate, its 32 KiB window allocated and charged to the memory limit. No window is allocated or charged now.
 - Pins warp 2c40175, where it pinned 46a58d2: warp main, with `Inflate.Contiguous`.
 - Pins warp 46a58d2, where it pinned 0dcd202: warp main, the one warp a program on aperture
   and visor links (aegis f52eabe for both). Nothing aperture calls changed.
+- aperture's own development holds it to the family's policy: `"policy": "family"` in
+  ci/preflight.json, beside the hardened profile ci/workflow.json already declares; the hardened
+  and hardened-tsan legs pass. `zig build check-consumer` runs among the gate's extra checks.
+  .gitattributes keeps every text file LF on every platform and the test images binary.
+

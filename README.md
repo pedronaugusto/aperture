@@ -87,6 +87,12 @@ decoder and encoder follow the arithmetic of the IJG's libjpeg, as libjpeg-turbo
 that their samples and files are libjpeg-turbo's; [LICENSES/IJG.md](LICENSES/IJG.md) names what follows it and holds
 the IJG's terms.
 
+## Stability
+
+aperture is 0.x and tracks Zig 0.17.x; 0.1.0 is its first release. A breaking change comes
+only in a minor release (0.1 to 0.2), with a CHANGELOG entry saying what changed and what to
+write instead; a patch release never breaks.
+
 ## Licence
 
 MIT, and the IJG's terms for what [LICENSES/IJG.md](LICENSES/IJG.md) names.

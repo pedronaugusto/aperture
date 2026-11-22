@@ -1,4 +1,5 @@
 {
+  "policy": "family",
   "sources": [
     "src"
   ],
@@ -9,6 +10,13 @@
     "src/testing"
   ],
   "test_dependencies": [],
+  "extra_checks": [
+    [
+      "zig",
+      "build",
+      "check-consumer"
+    ]
+  ],
   "shipped": {
     "LICENSES": "the IJG's terms, which travel with the JPEG decoder's code that follows its work"
   },

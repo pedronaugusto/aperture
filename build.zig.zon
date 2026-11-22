@@ -1,6 +1,6 @@
 .{
     .name = .aperture,
-    .version = "0.0.0",
+    .version = "0.1.0",
     .minimum_zig_version = "0.17.0",
     .fingerprint = 0xd89691f2b25f626b,
     .paths = .{ "build.zig", "build.zig.zon", "src", "README.md", "CHANGELOG.md", "LICENSE", "LICENSES" },
