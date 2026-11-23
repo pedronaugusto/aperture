@@ -77,6 +77,13 @@ pub const Descriptor = struct { x0: u32, y0: u32, x1: u32, y1: u32, at: u64 };
 const interlace_start = [5]u32{ std.math.maxInt(u32), 1, 2, 4, 0 };
 const interlace_delta = [5]u32{ 1, 2, 4, 8, 8 };
 
+/// The LZW decoder an image's pixel data goes through, and where it reports a refusal: held
+/// together so the report's place lives as long as the decoder that writes it.
+pub const Lzw = struct {
+    decompress: warp.lzw.Decompress,
+    diagnostic: warp.lzw.Diagnostic,
+};
+
 pub const Decoder = struct {
     gpa: Allocator,
     in: *Io.Reader,
@@ -98,7 +105,7 @@ pub const Decoder = struct {
     ended: bool = false,
     budget: aegis.bounded.Budget(usize),
     work: aegis.bounded.Budget(u64),
-    lzw: ?*warp.lzw.Decompress = null,
+    lzw: ?*Lzw = null,
 
     /// Read the header, the logical screen, the global palette and every
     /// block up to the first image's descriptor.
@@ -197,8 +204,8 @@ pub const Decoder = struct {
             d.frames = try Frames.init(d.gpa, d.width, d.height);
         }
         if (d.lzw == null) {
-            try d.charge(@sizeOf(warp.lzw.Decompress));
-            d.lzw = try d.gpa.create(warp.lzw.Decompress);
+            try d.charge(@sizeOf(Lzw));
+            d.lzw = try d.gpa.create(Lzw);
         }
 
         const flags = try d.byte();
@@ -211,7 +218,8 @@ pub const Decoder = struct {
         const width_at = d.offset;
         const literal_width = try d.byte();
         if (literal_width > warp.lzw.max_literal_width) return d.fail(error.Invalid, .gif_literal_width, width_at);
-        d.lzw.?.* = warp.lzw.Decompress.init(.{ .literal_width = @intCast(literal_width) }) catch aegis.assert.never("a literal width of at most 8 is valid");
+        const lzw = d.lzw.?;
+        lzw.decompress = warp.lzw.Decompress.init(.{ .literal_width = @intCast(literal_width), .diagnostic = &lzw.diagnostic }) catch aegis.assert.never("a literal width of at most 8 is valid");
 
         const w = d.width.raw();
         const h = d.height.raw();
@@ -248,14 +256,14 @@ pub const Decoder = struct {
     /// is reported, as Wuffs decodes what it holds first; after the end
     /// code, the remaining blocks are skipped.
     fn decodePixels(d: *Decoder, io: Io, place: *Placer, at: u64) ReadError!void {
-        const lzw = d.lzw.?;
+        const lzw = &d.lzw.?.decompress;
+        const diagnostic = &d.lzw.?.diagnostic;
         var block: [255]u8 = undefined;
         var given: aegis.units.Bytes(u64) = .fromRaw(0);
         // Pixels decoded since the last cancel check.
         var unchecked: usize = 0;
         try io.checkCancel();
-        var diagnostic: warp.lzw.Diagnostic = .{};
-        lzw.options.diagnostic = &diagnostic;
+        diagnostic.* = .{};
         while (true) {
             const size = try d.byte();
             if (size == 0) return;

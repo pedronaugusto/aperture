@@ -231,3 +231,30 @@ test "fuzz: any bytes and damaged GIFs decode or are refused by name, within the
     defer testing.allocator.free(files);
     try shakedown.check(testing.allocator, files, anyBytes, .{ .cases = 2000, .seed = 0x9f1 });
 }
+
+test "a GIF decoder keeps no pointer into the frame of a call that has returned" {
+    const header_end = std.mem.find(u8, corpus, "\n\n").?;
+    var body = corpus[header_end + 2 ..];
+    const file = while (body.len > 0) {
+        var fields: [3][]const u8 = undefined;
+        for (&fields) |*f| {
+            const n = std.mem.readInt(u32, body[0..4], .little);
+            f.* = body[4..][0..n];
+            body = body[4 + n ..];
+        }
+        if (std.mem.eql(u8, fields[0], "hat")) break fields[1];
+    } else return error.TestUnexpectedResult;
+    var r: std.Io.Reader = .fixed(file);
+    var d = try aperture.gif.Decoder.init(testing.allocator, &r, .{});
+    defer d.deinit();
+    const info = d.info();
+    const stride = aperture.PixelFormat.rgba8.rowBytes(info.width.raw());
+    const px = try testing.allocator.alloc(u8, (try stride.mul(info.height.raw())).raw());
+    defer testing.allocator.free(px);
+    const out: aperture.Mutable = .{ .width = info.width, .height = info.height, .format = .rgba8, .stride = stride, .pixels = px };
+    _ = (try d.nextFrame(testing.io, out)).?;
+    // Where the LZW decoder reports a refusal is memory the decoder holds.
+    const lzw = d.lzw.?;
+    const held = @intFromPtr(lzw);
+    if (lzw.decompress.options.diagnostic) |p| try testing.expect(@intFromPtr(p) >= held and @intFromPtr(p) < held + @sizeOf(@TypeOf(lzw.*)));
+}
