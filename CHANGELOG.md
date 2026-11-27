@@ -5,6 +5,8 @@ All notable changes to aperture are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-27
+
 ### Added
 
 - PNG decoding (`png.Decoder`, `decode`): every colour type and bit depth, Adam7, palette and
@@ -105,4 +107,3 @@ All notable changes to aperture are documented here. The format follows
   and hardened-tsan legs pass. `zig build check-consumer` runs among the gate's extra checks.
   .gitattributes keeps every text file LF on every platform and the test images binary.
 - Pins aegis 0.5.0.
-
