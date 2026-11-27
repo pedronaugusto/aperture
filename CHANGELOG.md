@@ -104,4 +104,5 @@ All notable changes to aperture are documented here. The format follows
   ci/preflight.json, beside the hardened profile ci/workflow.json already declares; the hardened
   and hardened-tsan legs pass. `zig build check-consumer` runs among the gate's extra checks.
   .gitattributes keeps every text file LF on every platform and the test images binary.
+- Pins aegis 0.5.0.
 
